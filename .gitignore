@@ -1,0 +1,7 @@
+# Build artifacts — the installed binary lives at ~/.claude/statusline.exe
+statusline
+statusline.exe
+dist/
+
+# Local pricing override (see pricing.json embedded default)
+pricing.local.json
