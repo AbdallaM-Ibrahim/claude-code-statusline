@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -120,6 +121,21 @@ func aheadBehind(ctx context.Context, repo *git.Repository, branch string, headH
 		return 0, 0, err
 	}
 
+	// The counts are a pure function of these two hashes, so a cache keyed on
+	// both is exact rather than merely fresh — see gitcache.go.
+	root := ""
+	if wt, err := repo.Worktree(); err == nil {
+		root = wt.Filesystem.Root()
+	}
+	key := aheadBehindKey(root, headHash.String(), ref.Hash().String())
+	cache := loadAheadBehindCache()
+	if hit, ok := cache.Entries[key]; ok {
+		hit.At = time.Now().Unix()
+		cache.Entries[key] = hit
+		cache.save()
+		return hit.Ahead, hit.Behind, nil
+	}
+
 	// A truncated walk must not produce counts. Set-differencing two partial
 	// ancestries yields numbers that look authoritative and are wrong — an
 	// observed run reported "↑1 ↓64" where git reported "+0 -72". Showing
@@ -145,6 +161,10 @@ func aheadBehind(ctx context.Context, repo *git.Repository, branch string, headH
 			behind++
 		}
 	}
+
+	cache.Entries[key] = aheadBehindEntry{Ahead: ahead, Behind: behind, At: time.Now().Unix()}
+	cache.save()
+
 	return ahead, behind, nil
 }
 
