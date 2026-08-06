@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 )
@@ -76,7 +77,14 @@ type PayloadWindow struct {
 	ResetsAt       *float64 `json:"resets_at"`
 }
 
+// utf8BOM is stripped before decoding. Go's JSON decoder rejects a leading BOM
+// outright, and anything that pipes the payload through a Windows shell can add
+// one — which turns a perfectly good payload into the bare "🤖 Claude" fallback.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
 func decodePayload(raw []byte) (*StatusLineInput, error) {
+	raw = bytes.TrimSpace(bytes.TrimPrefix(bytes.TrimSpace(raw), utf8BOM))
+
 	var in StatusLineInput
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, err
