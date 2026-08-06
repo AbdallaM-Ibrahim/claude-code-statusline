@@ -120,13 +120,17 @@ func aheadBehind(ctx context.Context, repo *git.Repository, branch string, headH
 		return 0, 0, err
 	}
 
-	local, err := ancestry(ctx, repo, headHash)
-	if err != nil {
-		return 0, 0, err
+	// A truncated walk must not produce counts. Set-differencing two partial
+	// ancestries yields numbers that look authoritative and are wrong — an
+	// observed run reported "↑1 ↓64" where git reported "+0 -72". Showing
+	// nothing is the honest outcome.
+	local, truncated, err := ancestry(ctx, repo, headHash)
+	if err != nil || truncated {
+		return 0, 0, errWalkTruncated
 	}
-	remote, err := ancestry(ctx, repo, ref.Hash())
-	if err != nil {
-		return 0, 0, err
+	remote, truncated, err := ancestry(ctx, repo, ref.Hash())
+	if err != nil || truncated {
+		return 0, 0, errWalkTruncated
 	}
 
 	ahead := 0
@@ -144,36 +148,45 @@ func aheadBehind(ctx context.Context, repo *git.Repository, branch string, headH
 	return ahead, behind, nil
 }
 
-// ancestryLimit bounds the walk. A status line does not need an exact count on a
-// branch thousands of commits divergent, and an unbounded walk on a large
-// history is exactly the stall the deadline exists to prevent.
-const ancestryLimit = 2000
+// ancestryLimit bounds the walk. An unbounded walk on a large history is exactly
+// the stall the deadline exists to prevent — but hitting either bound makes the
+// resulting counts meaningless, so truncation is reported rather than hidden.
+const ancestryLimit = 20000
 
-func ancestry(ctx context.Context, repo *git.Repository, from plumbing.Hash) (map[plumbing.Hash]struct{}, error) {
-	seen := make(map[plumbing.Hash]struct{}, 64)
+// ancestry collects every commit reachable from `from`. truncated is true when
+// the walk stopped early, in which case the set is incomplete and callers must
+// not derive counts from it.
+func ancestry(ctx context.Context, repo *git.Repository, from plumbing.Hash) (seen map[plumbing.Hash]struct{}, truncated bool, err error) {
+	seen = make(map[plumbing.Hash]struct{}, 64)
 	iter, err := repo.Log(&git.LogOptions{From: from})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer iter.Close()
 
 	count := 0
 	err = iter.ForEach(func(c *object.Commit) error {
 		if ctx.Err() != nil {
+			truncated = true
 			return storerStop
 		}
 		seen[c.Hash] = struct{}{}
 		count++
 		if count >= ancestryLimit {
+			truncated = true
 			return storerStop
 		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, storerStop) {
-		return nil, err
+		return nil, false, err
 	}
-	return seen, nil
+	return seen, truncated, nil
 }
 
 // storerStop ends a ForEach early without being treated as a failure.
 var storerStop = errors.New("stop")
+
+// errWalkTruncated means the commit walk did not finish, so ahead/behind cannot
+// be computed honestly.
+var errWalkTruncated = errors.New("commit walk truncated")

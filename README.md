@@ -57,6 +57,26 @@ add it to the table.
 
 Session cost is not computed — Claude Code passes it in the payload.
 
+## Known differences from the ccusage-based version
+
+Verified with `bun parity.ts`. Line 1 is byte-for-byte identical across every
+payload shape tested; these are the deliberate line 2 differences:
+
+| Difference | Why |
+|---|---|
+| `today` / `block` / burn rate are **higher** | ccusage's offline pricing table has no `claude-opus-5` entry and prices it at $0. Its own daily row for 2026-08-07 carries 44.9M tokens at `totalCost: 0`. Our table prices it. |
+| Burn-rate emoji thresholds | Ours is a plain documented rate threshold. ccusage's marker did not track the rate monotonically in observed output, so it keys off something not derivable from a transcript. |
+| No `session` figure when the payload omits `cost` | ccusage falls back to deriving session cost from the transcript. We only ever pass the payload's value through. Claude Code always sends it, so this shows up in synthetic payloads only. |
+
+The cost maths was validated at token level rather than against ccusage's
+dollars: our deduplicated totals since local midnight matched ccusage's own
+per-day token attribution exactly — `input 576`, `output 232533`,
+`cacheRead 44,271,478`, `cacheCreation 402,901`.
+
+Note when comparing by hand: ccusage caches its own status line output for one
+second by default, so consecutive invocations can report identical money figures
+regardless of the payload.
+
 ## Design contract
 
 Every segment is optional. A missing payload field, an unreadable file, or a
