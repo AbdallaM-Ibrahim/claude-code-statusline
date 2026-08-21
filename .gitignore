@@ -3,5 +3,9 @@ statusline
 statusline.exe
 dist/
 
-# Local pricing override (see pricing.json embedded default)
+# Scratch pricing experiments. The real override is a pricing.json placed next to
+# the installed binary — nothing reads this name.
 pricing.local.json
+
+# Benchmark output
+bench/results*.json
