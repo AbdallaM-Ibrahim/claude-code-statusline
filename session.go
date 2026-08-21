@@ -7,9 +7,9 @@ import (
 
 // modelSegment renders "🤖 Opus 5 ⚡ xhigh 💭".
 func modelSegment(in *StatusLineInput) string {
-	name := in.Model.DisplayName
+	name := safeTerminal(in.Model.DisplayName)
 	if name == "" {
-		name = in.Model.ID
+		name = safeTerminal(in.Model.ID)
 	}
 	if name == "" {
 		name = "Claude"
@@ -20,7 +20,7 @@ func modelSegment(in *StatusLineInput) string {
 		bits = append(bits, "⚡")
 	}
 	if in.Effort.Level != "" {
-		bits = append(bits, dim(in.Effort.Level))
+		bits = append(bits, dim(safeTerminal(in.Effort.Level)))
 	}
 	if in.Thinking.Enabled {
 		bits = append(bits, "💭")

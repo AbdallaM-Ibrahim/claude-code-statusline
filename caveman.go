@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"strings"
 )
@@ -24,15 +25,32 @@ const cavemanMaxBytes = 64
 // to something secret would render that file's bytes — including any escape
 // sequences it contains — to the terminal on every keystroke. Ported from the
 // plugin's own hook, which hardens the same way.
+// The checks are deliberately split across a path and a handle. Lstat rejects a
+// link without following it, which os.Open cannot do portably; SameFile then
+// confirms the handle we opened is the file Lstat approved, so substituting a
+// link for the flag between the two calls fails the second check instead of
+// quietly reading the link's target.
 func readCavemanFile(path string) (string, bool) {
-	fi, err := os.Lstat(path)
+	li, err := os.Lstat(path)
 	if err != nil {
 		return "", false
 	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() || fi.Size() > cavemanMaxBytes {
+	if li.Mode()&os.ModeSymlink != 0 || !li.Mode().IsRegular() || li.Size() > cavemanMaxBytes {
 		return "", false
 	}
-	data, err := os.ReadFile(path)
+
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > cavemanMaxBytes || !os.SameFile(li, fi) {
+		return "", false
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, cavemanMaxBytes))
 	if err != nil {
 		return "", false
 	}
@@ -79,23 +97,11 @@ func cavemanSegment() string {
 	// Savings suffix, written by /caveman-stats. Absent until that has run once.
 	if os.Getenv("CAVEMAN_STATUSLINE_SAVINGS") != "0" {
 		if suffixRaw, ok := readCavemanFile(cavemanSuffixPath()); ok {
-			if suffix := stripControl(strings.TrimRight(suffixRaw, " \t\r\n")); suffix != "" {
+			if suffix := strings.TrimSpace(safeTerminal(suffixRaw)); suffix != "" {
 				out += " " + suffix
 			}
 		}
 	}
 
 	return orange(out)
-}
-
-// stripControl removes C0 control bytes, so the suffix file cannot smuggle
-// escape sequences either.
-func stripControl(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r >= 0x20 || r == '\t' {
-			b.WriteRune(r)
-		}
-	}
-	return strings.TrimSpace(b.String())
 }

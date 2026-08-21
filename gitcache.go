@@ -60,7 +60,9 @@ func (c *aheadBehindCache) save() {
 	}
 	path := gitCachePath()
 	tmp := path + "." + strconv.Itoa(os.Getpid()) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// 0600 for the same reason as the cost state: it maps local repository paths
+	// to commit hashes, which is nobody else's business on a shared machine.
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {

@@ -111,7 +111,7 @@ func render(raw []byte) string {
 	}
 
 	if place == "" {
-		place = cyan(basename(cwd))
+		place = cyan(dirLabel(cwd))
 	}
 	return place + "\n" + buildSessionLine(in, session.limits, session.cost)
 }

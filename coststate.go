@@ -88,7 +88,9 @@ func (st *costState) save(path string) {
 		return
 	}
 	tmp := path + "." + strconv.Itoa(os.Getpid()) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// 0600: this file enumerates every project path on the machine and the id of
+	// every API response seen in the last two days. No other account needs it.
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -205,15 +207,14 @@ func (st *costState) consume(path string, offset, horizonHour int64) int64 {
 	consumed := offset
 
 	for {
-		raw, err := r.ReadString('\n')
-		if err != nil && len(raw) == 0 {
-			break
-		}
-		complete := err == nil // a trailing chunk without '\n' is still being written
+		raw, n, complete, oversize := readLine(r)
 		if !complete {
-			break
+			break // a trailing chunk without '\n' is still being written
 		}
-		consumed += int64(len(raw))
+		consumed += n
+		if oversize {
+			continue // counted and stepped over, never held in memory or parsed
+		}
 
 		line := []byte(strings.TrimRight(raw, "\r\n"))
 		if len(line) == 0 {
@@ -274,6 +275,45 @@ func (st *costState) consume(path string, offset, horizonHour int64) int64 {
 	}
 
 	return consumed
+}
+
+// maxLineBytes bounds one transcript line. Entries carry full message content so
+// they are legitimately large, but nothing real approaches this — and a read that
+// accumulates until the next newline turns one corrupt or hostile file into
+// unbounded resident memory, in a process that runs every few seconds.
+const maxLineBytes = 4 << 20
+
+// readLine reads one newline-terminated line without ever holding more than
+// maxLineBytes of it.
+//
+// n counts every byte consumed including the newline, oversize or not: the cursor
+// has to step past an over-long line, or the next render reads it again and the
+// scan never makes progress. complete is false for a trailing chunk with no
+// newline yet — the writer is mid-record, so that offset is not committed.
+func readLine(r *bufio.Reader) (line string, n int64, complete, oversize bool) {
+	var b strings.Builder
+	for {
+		chunk, err := r.ReadSlice('\n')
+		n += int64(len(chunk))
+
+		if !oversize {
+			if int64(b.Len())+int64(len(chunk)) > maxLineBytes {
+				oversize = true
+				b.Reset() // stop accumulating; the line is already unusable
+			} else {
+				b.Write(chunk)
+			}
+		}
+
+		switch err {
+		case nil:
+			return b.String(), n, true, oversize
+		case bufio.ErrBufferFull:
+			continue // more of the same line
+		default:
+			return "", n, false, oversize // EOF or read error: no terminator yet
+		}
+	}
 }
 
 func findTranscripts(root string) []string {
