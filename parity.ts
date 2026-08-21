@@ -20,14 +20,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const HOME = homedir();
-const GO = join(HOME, ".claude", "statusline.exe");
-const JS = join(HOME, ".claude", "statusline.js");
-const TRANSCRIPT = join(
-  HOME, ".claude", "projects",
-  "C--Users-abdo-workspace-software-engineer-website",
-  "741a0639-b2eb-42f0-8f7e-5827c5932a1f.jsonl",
-);
-const REPO = "C:/Users/abdo/workspace/software-engineer-website";
+const EXE = process.platform === "win32" ? "statusline.exe" : "statusline";
+
+/**
+ * Everything machine-specific comes from the environment, because this harness
+ * compares against an implementation that only exists on a machine which ran the
+ * old version:
+ *
+ *   STATUSLINE_GO          path to the Go binary        (default ~/.claude/<exe>)
+ *   STATUSLINE_JS          path to the old bun entry    (default ~/.claude/statusline.js)
+ *   STATUSLINE_TEST_REPO   repository for line 1        (default this checkout)
+ *   STATUSLINE_TRANSCRIPT  a .jsonl transcript to cite  (optional)
+ *
+ * Without STATUSLINE_JS present there is nothing to diff against, and the
+ * harness says so rather than reporting a false pass.
+ */
+const GO = process.env.STATUSLINE_GO || join(HOME, ".claude", EXE);
+const JS = process.env.STATUSLINE_JS || join(HOME, ".claude", "statusline.js");
+const REPO = process.env.STATUSLINE_TEST_REPO || join(import.meta.dir);
+const TRANSCRIPT = process.env.STATUSLINE_TRANSCRIPT || "";
 
 /**
  * Differences we have decided are correct, with the reason.

@@ -1,6 +1,6 @@
-module claude-statusline
+module github.com/AbdallaM-Ibrahim/claude-code-statusline
 
-go 1.26.5
+go 1.26.6
 
 require (
 	dario.cat/mergo v1.0.0 // indirect

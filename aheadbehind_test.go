@@ -12,9 +12,9 @@ import (
 // deadline-truncated commit walk and reported "↑1 ↓64" where git reported
 // "+0 -72", so this pins the behaviour.
 func TestAheadBehindMatchesGit(t *testing.T) {
-	skipWithoutRepo(t)
+	repo := repoForTest(t)
 
-	out, err := exec.Command("git", "-C", testRepo, "status", "--porcelain=v2", "--branch", "--untracked-files=no").Output()
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain=v2", "--branch", "--untracked-files=no").Output()
 	if err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestAheadBehindMatchesGit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	g, err := readGit(ctx, testRepo)
+	g, err := readGit(ctx, repo)
 	if err != nil {
 		t.Fatalf("readGit: %v", err)
 	}
@@ -47,12 +47,12 @@ func TestAheadBehindMatchesGit(t *testing.T) {
 // With an already-dead context the walk cannot complete, so no counts may be
 // reported — zeroes here mean "not shown", not "in sync".
 func TestAheadBehindOmittedWhenWalkTruncated(t *testing.T) {
-	skipWithoutRepo(t)
+	repo := repoForTest(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	g, err := readGit(ctx, testRepo)
+	g, err := readGit(ctx, repo)
 	if err != nil {
 		t.Skipf("repo could not be opened: %v", err)
 	}

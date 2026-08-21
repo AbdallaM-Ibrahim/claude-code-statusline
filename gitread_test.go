@@ -3,28 +3,68 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-// The repository the status line is normally pointed at. Skipped when absent so
-// the suite still runs on another machine.
-const testRepo = "C:/Users/abdo/workspace/software-engineer-website"
-
-func skipWithoutRepo(t *testing.T) {
-	t.Helper()
-	if _, err := os.Stat(testRepo + "/.git"); err != nil {
-		t.Skipf("test repo not present: %v", err)
+// testRepoPath resolves the repository the git tests and benchmarks read:
+//
+//	STATUSLINE_TEST_REPO   an explicit choice — point it at a large history to
+//	                       make the ahead/behind benchmark say something
+//	this module's own repo  every clone of this project is a git repository, so a
+//	                       fresh checkout needs no setup at all
+//	""                     nothing usable, and the caller skips
+//
+// This used to be a const naming a directory on the author's machine, which
+// meant every git test silently skipped for everybody else.
+func testRepoPath() string {
+	if p := os.Getenv("STATUSLINE_TEST_REPO"); p != "" {
+		if isGitRepo(p) {
+			return p
+		}
+		return ""
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for dir := wd; ; {
+		if isGitRepo(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
 	}
 }
 
+// isGitRepo accepts both a .git directory and the .git file a worktree gets.
+func isGitRepo(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+// repoForTest is testRepoPath with the skip attached, for tests and benchmarks
+// alike.
+func repoForTest(tb testing.TB) string {
+	tb.Helper()
+	p := testRepoPath()
+	if p == "" {
+		tb.Skip("no git repository found; set STATUSLINE_TEST_REPO to one")
+	}
+	return p
+}
+
 func TestReadGitRealRepo(t *testing.T) {
-	skipWithoutRepo(t)
+	repo := repoForTest(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	g, err := readGit(ctx, testRepo)
+	g, err := readGit(ctx, repo)
 	if err != nil {
 		t.Fatalf("readGit: %v", err)
 	}
@@ -56,12 +96,12 @@ func TestReadGitNonRepoFails(t *testing.T) {
 
 // A cancelled context must not hang or panic; it degrades to partial data.
 func TestReadGitRespectsCancelledContext(t *testing.T) {
-	skipWithoutRepo(t)
+	repo := repoForTest(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	g, err := readGit(ctx, testRepo)
+	g, err := readGit(ctx, repo)
 	if err != nil {
 		t.Skipf("repo could not be opened at all: %v", err)
 	}
