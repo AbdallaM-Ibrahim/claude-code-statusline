@@ -1,0 +1,13 @@
+# Windows CI runners check out with core.autocrlf=true by default, and gofmt
+# treats a CRLF Go file as unformatted — so without this the gofmt check fails on
+# Windows and passes everywhere else. Normalise to LF in the working tree on
+# every platform.
+* text=auto eol=lf
+
+# PowerShell is the exception: Windows PowerShell 5.1 is happiest with CRLF, and
+# these scripts are only ever run by it.
+*.ps1 text eol=crlf
+
+# Never touch these.
+*.exe binary
+*.png binary
