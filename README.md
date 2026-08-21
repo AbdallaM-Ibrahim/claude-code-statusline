@@ -1,84 +1,443 @@
-# claude-statusline
+# claude-code-statusline
 
-Claude Code status line as a single compiled binary. Replaces the bun/TypeScript
-version at `~/.claude/statusline.js`.
+[![ci](https://github.com/AbdallaM-Ibrahim/claude-code-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/AbdallaM-Ibrahim/claude-code-statusline/actions/workflows/ci.yml)
 
-Two lines:
+A [Claude Code](https://claude.com/claude-code) status line as one compiled Go
+binary. No interpreter, no subprocesses, no network — it reads its payload on
+stdin and prints two lines:
 
 ```
 software-engineer-website ⟨main ↓72⟩ be66d0f 2w ago · first commit
-🤖 Opus 5 xhigh 💭 | 🧠 34% | 💰 $1.42 session | 🔥 $2.10/hr | ⏳ 5h 42% resets 3:15pm | [CAVEMAN]
+🤖 Opus 5 xhigh 💭 | 🧠 34% | 💰 $1.42 session / $8.90 today | 🔥 $2.10/hr 🟢 | ⏳ 5h 42% resets 3:15pm · 7d 18%
 ```
+
+Line 1 is **where you are**: directory, branch, ahead/behind, HEAD, commit age
+and subject. Line 2 is **what the session costs**: model, effort, context
+pressure, money, burn rate and rate-limit windows.
+
+Every segment is optional. A missing payload field, an unreadable file or a
+failing subsystem drops **that segment only** — it never blanks the line, and
+unparseable stdin degrades to a bare `🤖 Claude`.
+
+---
 
 ## Why a binary
 
-The status line runs every 10s and the previous version spawned four processes
-per render — bun, `git status`, `git log`, `ccusage`. On a 4-core machine under
-load, bare bun interpreter startup inflated 9.8× (86ms → 842ms) while git, doing
-real I/O, inflated only 2.1×. Process creation was the bottleneck, so this
-version spawns nothing: git is read natively, cost is computed in-process.
+The status line runs on a timer — every 10 seconds by default — and the version
+this replaces spawned four processes per render: `bun`, `git status`, `git log`,
+`ccusage`.
 
-## Build
+Process creation, not the work, was the cost. Measured on a 4-core laptop under
+sustained load, bare `bun -e ''` startup inflated **9.8×** (86 ms → 842 ms) while
+`git log`, doing real I/O, inflated only **2.1×**. So this version spawns nothing:
+git objects are read in-process with [go-git](https://github.com/go-git/go-git),
+and cost is computed from the transcripts directly instead of shelling out to
+`ccusage`.
+
+See [Benchmarks](#benchmarks) for what that bought.
+
+---
+
+## Install
+
+### Prebuilt binary
+
+Grab the one for your platform from the latest release (or build it — it takes
+seconds), and drop it wherever you like. `~/.claude/` is the conventional home:
+
+| Platform | Asset |
+|---|---|
+| Windows x64 | `statusline-windows-amd64.exe` |
+| macOS Apple silicon | `statusline-darwin-arm64` |
+| macOS Intel | `statusline-darwin-amd64` |
+| Linux x64 | `statusline-linux-amd64` |
+| Linux arm64 | `statusline-linux-arm64` |
+
+On macOS and Linux, `chmod +x` it.
+
+### With Go
 
 ```sh
-go build -o ~/.claude/statusline.exe .    # Windows
-go build -o ~/.claude/statusline .        # macOS / Linux
+go install github.com/AbdallaM-Ibrahim/claude-code-statusline@latest
 ```
 
-There is no auto-rebuild. Edit, build, done.
+That lands in `$(go env GOPATH)/bin/claude-code-statusline`.
 
-Cross-compile every target into `dist/` with `./build.ps1`. Pure Go, no cgo.
+### From source
 
-## Wiring
+```sh
+git clone https://github.com/AbdallaM-Ibrahim/claude-code-statusline
+cd claude-code-statusline
 
-`~/.claude/settings.json`:
+go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline        # macOS / Linux
+go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline.exe .  # Windows
+```
 
-```json
-"statusLine": {
-  "type": "command",
-  "command": "C:/Users/abdo/.claude/statusline.exe",
-  "padding": 0,
-  "refreshInterval": 10
+Pure Go, no cgo. `./build.ps1` cross-compiles every target into `dist/` and
+installs the host binary in one step.
+
+Requires Go **1.26.6 or newer** — that floor is a security requirement, not a
+preference. See [SECURITY.md](SECURITY.md#dependency-scanning).
+
+---
+
+## Wiring it up
+
+Add this to `~/.claude/settings.json`:
+
+```jsonc
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/Users/you/.claude/statusline",   // macOS / Linux
+    "padding": 0,
+    "refreshInterval": 10
+  }
 }
 ```
 
-## Pricing
+On Windows use a forward-slashed absolute path:
+
+```jsonc
+"command": "C:/Users/you/.claude/statusline.exe"
+```
+
+`padding: 0` lets line 1 start at the left edge. `refreshInterval` is in seconds;
+the render is cheap enough that 10 is comfortable, and there is a hard 2-second
+deadline on the whole thing regardless.
+
+---
+
+## What each segment means
+
+### Line 1 — place
+
+| Segment | Example | Hidden when |
+|---|---|---|
+| Directory | `software-engineer-website` | never |
+| Branch | `⟨main⟩` | not a repository |
+| Detached HEAD | `⟨detached⟩` | on a branch |
+| Ahead / behind | `⟨main ↑2 ↓72⟩` | no upstream, or the commit walk could not finish |
+| Short HEAD | `be66d0f` | no commits yet |
+| Commit age | `2w ago` | commit unreadable |
+| Subject | `· first commit` | commit unreadable; cut at 40 runes |
+| Worktree | `⑂ feature-x` | payload has no worktree |
+| Pull request | `PR #12` | payload has no PR |
+| Agent | `@explore` | not running as a subagent |
+
+Ahead/behind is as fresh as your last `fetch` — it compares against the
+remote-tracking ref on disk, exactly as `git status --branch` does, and never
+touches the network.
+
+### Line 2 — session
+
+| Segment | Example | Notes |
+|---|---|---|
+| Model | `🤖 Opus 5` | falls back to the model id, then to `Claude` |
+| Fast mode | `⚡` | only when enabled |
+| Effort | `xhigh` | from the payload |
+| Thinking | `💭` | only when enabled |
+| Context | `🧠 34%` | pre-computed percentage, else derived from the token breakdown |
+| Money | `💰 $1.42 session / $8.90 today / $4.10 block (3h 42m left)` | session is exact (Claude Code sends it); the rest is computed |
+| Burn rate | `🔥 $2.10/hr 🟢` | `🟢` under $5/hr, `⚠️` from $5, `🔴` from $15 |
+| Rate limits | `⏳ 5h 42% resets 3:15pm · 7d 18%` | payload window reconciled against the account record |
+| Caveman | `[CAVEMAN]` | only with the [caveman plugin](https://github.com/JuliusBrussee/caveman) active |
+
+Percentages share one colour scale: green under 50%, yellow from 50%, red from
+75%.
+
+The block estimate is dropped when the payload already carries a rate-limit
+window — two competing "how much is left" readings on one line is one too many.
+
+---
+
+## Configuration
+
+| Variable | Effect |
+|---|---|
+| `CLAUDE_CONFIG_DIR` | Where Claude Code state lives. Honoured everywhere, so the whole thing can be pointed at a scratch directory. |
+| `CAVEMAN_STATUSLINE_SAVINGS=0` | Suppresses the savings suffix after `[CAVEMAN]`. |
+| `STATUSLINE_TEST_REPO` | Repository the test suite and git benchmarks read. Defaults to your checkout. |
+
+### Pricing
 
 Transcripts record token counts and a model name, never a cost. `today`, `block`
-and the burn rate are therefore computed from `pricing.json` (embedded at build
-time via `go:embed`).
+and the burn rate are therefore priced from `pricing.json`, embedded at build
+time with `go:embed` (25 models at present).
 
-Drop a `pricing.json` next to the binary to override without rebuilding.
+To override without rebuilding, drop a `pricing.json` next to the binary; its
+entries win. That is the escape hatch for a model released after your build —
+and a reason to keep the binary somewhere only you can write
+(see [SECURITY.md](SECURITY.md)).
 
-An **unknown model contributes nothing** and forces a `~` prefix on the affected
-figures (`💰 ~$1.42 today`). Guessing a rate would render confidently wrong
-money, which is worse than visibly incomplete money. When a new model ships,
-add it to the table.
+An **unknown model contributes nothing** and marks the affected figures with a
+`~` (`💰 ~$8.90 today`). Guessing a rate renders confidently wrong money, which
+reads exactly like correct money; visibly incomplete is better.
 
-Session cost is not computed — Claude Code passes it in the payload.
+Session cost is never computed — Claude Code passes it in the payload.
 
-## Known differences from the ccusage-based version
+---
 
-Verified with `bun parity.ts`. Line 1 is byte-for-byte identical across every
-payload shape tested; these are the deliberate line 2 differences:
+## How it works
+
+```
+stdin (JSON payload)
+        │
+        ├── goroutine 1 ──▶ go-git: HEAD, branch, one commit, ahead/behind    (400ms deadline)
+        │                     └── ahead/behind cached on the (HEAD, upstream) hash pair
+        │
+        └── goroutine 2 ──▶ rate-limit windows: payload + ~/.claude.json
+                            cost: incremental transcript scan ─▶ hour buckets ─▶ today / block / burn
+                                                                      (2s deadline over everything)
+```
+
+Things worth knowing:
+
+- **Deadlines, not hopes.** The whole render is bounded at 2 s and the git read at
+  400 ms. On expiry whatever has landed is printed; partial beats blank.
+- **Panics are contained.** Each goroutine recovers on its own, so one broken
+  subsystem costs its own segments and nothing else.
+- **The ahead/behind cache is exact, not stale-tolerant.** The counts are a pure
+  function of the HEAD and upstream hashes, so the cache is keyed on both. If
+  neither moved, the answer cannot have changed.
+- **A truncated commit walk reports nothing.** Set-differencing two partial
+  ancestries produces authoritative-looking wrong numbers — an early revision
+  showed `↑1 ↓64` where git said `+0 -72`. The walk is bounded at 20 000 commits
+  and refuses to guess.
+- **The transcript scan is incremental.** Files are keyed by path with the size
+  and mtime last consumed, so an unchanged file is dismissed on a stat and a
+  grown one is read from its previous offset. Only complete, newline-terminated
+  lines advance the cursor, so a record caught mid-write is not lost.
+- **Responses are deduplicated.** Transcripts repeat entries — in one install
+  2044 assistant lines collapsed to 959 unique responses, so counting naively
+  roughly doubles every figure.
+- **Nothing older than 48 hours is remembered**, which is what keeps the state
+  file and the dedup set bounded.
+
+### File map
+
+| File | Responsibility |
+|---|---|
+| `main.go` | fan-out, deadlines, panic isolation, fallback |
+| `payload.go` | the stdin contract |
+| `place.go` | line 1 composition |
+| `gitread.go`, `gitcache.go` | native git reads, ahead/behind and its cache |
+| `session.go` | line 2 composition |
+| `cost.go`, `coststate.go` | incremental transcript scan, hour buckets, block maths |
+| `pricing.go`, `pricing.json` | token → dollars |
+| `limits.go` | rate-limit windows and reconciliation |
+| `caveman.go` | caveman plugin indicator |
+| `sanitize.go` | terminal-safety filter for every untrusted string |
+| `render.go` | colours, ages, clocks, truncation |
+| `bench/e2e.ps1` | wall-clock harness including process creation |
+| `parity.ts` | diffs this against the bun version it replaces |
+
+---
+
+## Benchmarks
+
+All numbers below were measured on the machine that runs this status line:
+
+> **Intel Core i5-3320M @ 2.60 GHz**, 4 logical cores, Windows 10, Go 1.26.6.
+> A 2012 dual-core laptop — deliberately the slow end. The box was **not
+> quiescent**: a Claude Code session was running throughout, which is realistic
+> but noisy, so `min` is the cleanest estimate and `median` the honest one.
+> Reproduce with the commands under each table.
+
+### End to end: what a status line tick actually costs
+
+This is the number that matters, because it includes process creation — the thing
+the rewrite was for. Identical payload on stdin, both arms interleaved iteration
+by iteration so any load spike hits them equally, 30 iterations each, against the
+real `~/.claude` with a 1.3 MB transcript named in the payload.
+
+**Idle:**
+
+| arm | min | median | p90 | max |
+|---|---|---|---|---|
+| **this binary** | **36.3 ms** | **45.4 ms** | 71.4 ms | 84.9 ms |
+| the bun version it replaces | 192 ms | 251.4 ms | 383.9 ms | 456.3 ms |
+| `bun -e ''` (calibration) | 20.2 ms | 23.5 ms | 36.7 ms | 43.1 ms |
+
+**All four cores saturated:**
+
+| arm | min | median | p90 | max |
+|---|---|---|---|---|
+| **this binary** | **32.2 ms** | **49.1 ms** | 103.7 ms | 231.1 ms |
+| the bun version it replaces | 231.6 ms | 290 ms | 477.1 ms | 657.3 ms |
+| `bun -e ''` (calibration) | 19.9 ms | 27.9 ms | 59.1 ms | 73.9 ms |
+
+**5.5× faster idle, 5.9× under full load.** Note where the old version's floor
+comes from: bare interpreter startup alone (23.5 ms) is half of this binary's
+entire render, before a single byte of git or cost work.
+
+Two things to keep the comparison honest:
+
+- The `bun -e ''` row is why the ratio holds up under load: interpreter startup is
+  what inflates, and the old version paid it before doing any work at all.
+- The old arm needs `transcript_path` in the payload or it skips its `ccusage`
+  subprocess entirely and looks 1.5× better than it is. The harness supplies one.
+  The Go binary ignores that field — it scans the projects directory — so the
+  field changes only the arm being compared against.
+
+```powershell
+pwsh bench/e2e.ps1                     # idle
+pwsh bench/e2e.ps1 -Load               # every core saturated
+pwsh bench/e2e.ps1 -Isolate            # against a scratch CLAUDE_CONFIG_DIR
+```
+
+Windows PowerShell 5.1 works too — the script is deliberately ASCII and avoids
+.NET Core-only APIs.
+
+### In-process: where the time goes
+
+`min / median` of 5 runs, `-benchmem`:
+
+| benchmark | min | median | B/op | allocs/op | what it covers |
+|---|---|---|---|---|---|
+| `RenderFull` | 8.4 ms | 9.3 ms | 285 KB | 1 870 | both lines, both goroutines, warm caches |
+| `DecodePayload` | 14.3 µs | 28.7 µs | 696 B | 14 | the stdin parse |
+| `GitReadOnly` | 3.6 ms | 6.7 ms | 100 KB | 582 | line 1 on this repo (10 commits) |
+| `GitReadOnly` | 26.1 ms | 44.3 ms | 341 KB | 2 354 | line 1 on a 73-commit repo |
+| `AheadBehindUncached` | 50.0 ms | 94.4 ms | 2.0 MB | 16 261 | the double ancestry walk, cache bypassed |
+| `CostScanSteadyState` | 5.9 ms | 12.7 ms | 71 KB | 1 028 | 1 000 entries across 4 transcripts, nothing changed |
+| `CostScanCold` | 22.5 ms | 38.3 ms | 1.72 MB | 19 802 | the same fixture parsed from scratch |
+| `LimitsSegment` | 1.28 ms | 1.39 ms | 67 KB | 43 | read + parse the 62 KB `~/.claude.json` |
+| `CavemanSegment` | 0.59 ms | 0.91 ms | 4.6 KB | 35 | two guarded small-file reads |
+
+Read that table as a set of design decisions rather than trivia:
+
+- **`RenderFull` (8.4 ms) is less than its parts summed** — line 1 and line 2 are
+  gathered concurrently, so the git read hides behind the transcript scan.
+- **`AheadBehindUncached` at 50–94 ms is why `gitcache.go` exists**, and why it is
+  keyed on the `(HEAD, upstream)` hash pair rather than a timer: at that price you
+  want to pay it only when an answer could actually have changed. `GitReadOnly`,
+  which hits that cache, is 7–14× cheaper on the same repository.
+- **Cold vs steady-state cost scan (38.3 ms → 12.7 ms)** is the incremental cursor
+  earning its keep. In normal operation almost every transcript is dismissed on a
+  stat.
+- **`LimitsSegment` is a fixed ~1.3 ms tax** for parsing the account record. It is
+  the reason that file is decoded into a narrow struct rather than a generic map.
+
+```sh
+go test -run '^$' -bench . -benchmem -count=5
+
+# the git rows want a repository with history and an upstream
+STATUSLINE_TEST_REPO=~/some/repo go test -run '^$' -bench 'Git|AheadBehind' -benchmem -count=5
+```
+
+### Binary size
+
+| target | asset | size |
+|---|---|---|
+| Windows x64 | `statusline-windows-amd64.exe` | 7.1 MB |
+| macOS Apple silicon | `statusline-darwin-arm64` | 6.4 MB |
+| macOS Intel | `statusline-darwin-amd64` | 7.0 MB |
+| Linux x64 | `statusline-linux-amd64` | 6.8 MB |
+| Linux arm64 | `statusline-linux-arm64` | 6.3 MB |
+
+Pure Go, no cgo, `-trimpath -ldflags "-s -w"`. Most of it is go-git and its
+crypto dependencies — the price of not shelling out to `git`.
+
+### Historical note
+
+The `9.8×` interpreter-inflation figure quoted above comes from a manual A/B run
+on 2026-08-07 under sustained 100% CPU on the same 4-core box, recorded while the
+old version was still in service: `bun -e ''` median went 86 ms → 842 ms while
+`git log` via `spawnSync` went 115 ms → 243 ms. Process creation, not the work,
+was the bottleneck — which is what made a compiled binary worth writing rather
+than optimising the TypeScript.
+
+---
+
+## Development
+
+```sh
+go test ./...                  # suite
+go test -race ./...            # the render fans out; the detector earns its keep
+go vet ./...
+gofmt -l .                     # must print nothing
+go build .
+
+go test -run '^$' -bench . -benchmem -count=5   # micro-benchmarks
+```
+
+The git tests and benchmarks resolve their repository in this order:
+`STATUSLINE_TEST_REPO`, then the checkout you are in, then skip. Point the
+variable at a repository with an upstream and a long history to make the
+ahead/behind benchmark say something:
+
+```sh
+STATUSLINE_TEST_REPO=~/work/some-big-repo go test -run '^$' -bench AheadBehind -count=5
+```
+
+CI runs the suite on Linux, macOS and Windows, plus `go vet`, `gofmt`,
+`go test -race` and `govulncheck`.
+
+### Parity against the old version
+
+`parity.ts` diffs this binary against the bun/TypeScript status line it replaced,
+across the payload shapes that actually vary. It needs bun and a copy of the old
+`statusline.js`, so it is only useful on a machine that ran that version:
+
+```sh
+STATUSLINE_JS=~/.claude/statusline.js bun parity.ts
+```
+
+Line 1 was verified byte-for-byte identical across every payload shape tested.
+The deliberate line 2 differences:
 
 | Difference | Why |
 |---|---|
-| `today` / `block` / burn rate are **higher** | ccusage's offline pricing table has no `claude-opus-5` entry and prices it at $0. Its own daily row for 2026-08-07 carries 44.9M tokens at `totalCost: 0`. Our table prices it. |
+| `today` / `block` / burn are **higher** | ccusage's offline pricing table has no `claude-opus-5` entry and priced it at $0 — its own daily row for 2026-08-07 carried 44.9M tokens at `totalCost: 0`. This table prices it. |
 | Burn-rate emoji thresholds | Ours is a plain documented rate threshold. ccusage's marker did not track the rate monotonically in observed output, so it keys off something not derivable from a transcript. |
-| No `session` figure when the payload omits `cost` | ccusage falls back to deriving session cost from the transcript. We only ever pass the payload's value through. Claude Code always sends it, so this shows up in synthetic payloads only. |
+| No `session` figure when the payload omits `cost` | ccusage derives one from the transcript; this only ever passes the payload's value through. Claude Code always sends it, so this shows up in synthetic payloads only. |
 
 The cost maths was validated at token level rather than against ccusage's
-dollars: our deduplicated totals since local midnight matched ccusage's own
-per-day token attribution exactly — `input 576`, `output 232533`,
-`cacheRead 44,271,478`, `cacheCreation 402,901`.
+dollars: deduplicated totals since local midnight matched ccusage's own per-day
+token attribution exactly — `input 576`, `output 232 533`,
+`cacheRead 44 271 478`, `cacheCreation 402 901`.
 
-Note when comparing by hand: ccusage caches its own status line output for one
-second by default, so consecutive invocations can report identical money figures
-regardless of the payload.
+---
 
-## Design contract
+## Security
 
-Every segment is optional. A missing payload field, an unreadable file, or a
-failing subsystem drops **that segment only** — it never blanks the line, and
-malformed stdin falls back to a single `🤖 Claude`.
+No network, no subprocesses, no secrets read or logged. The interesting surface
+is that **a repository you did not write supplies text this program prints to
+your terminal on a timer** — so every untrusted string is filtered through
+`safeTerminal` before it is coloured or truncated, stripping escape introducers,
+DEL, single-byte C1 CSI/OSC, bidi overrides and invalid UTF-8.
+
+[SECURITY.md](SECURITY.md) has the threat model, the findings fixed in the first
+public release, and how to report anything new.
+
+---
+
+## Known limitations
+
+- **Concurrent renders can undercount, briefly.** Several sessions rendering at
+  once read-modify-write one cost-state file; the last writer wins. The next
+  render re-reads from each file's stored offset, so it self-corrects, but a tick
+  can report slightly low.
+- **Ahead/behind is as stale as your last fetch.** By design — the render never
+  touches the network.
+- **A model missing from the pricing table contributes $0** and marks the figures
+  `~`. Add it to `pricing.json`.
+- **`~/.claude.json` is read on every render** for the account-wide rate-limit
+  record. It is a ~50 KB parse, which the benchmarks below account for.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| A bare `🤖 Claude` | stdin did not parse as JSON. Check the command in `settings.json` actually points at the binary. |
+| No money segments | No transcripts inside the 48-hour horizon, or `CLAUDE_CONFIG_DIR` points somewhere empty. |
+| Money marked `~` | A model in your transcripts is missing from the pricing table. |
+| No `↑`/`↓` | The branch has no upstream, or the commit walk hit its bound and refused to guess. |
+| Line 1 is only a directory name | Not a git repository, or the git read exceeded its 400 ms deadline. |
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Abdalla Mostafa
