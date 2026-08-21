@@ -1,0 +1,156 @@
+name: release
+
+# Pushing a v* tag builds every target and publishes them as release assets.
+#
+# The binaries are built here rather than uploaded from somebody's laptop, so
+# what people download is reproducible from the tag: same toolchain, same flags,
+# no local state. Pure Go and CGO_ENABLED=0, so one Linux runner cross-compiles
+# all five targets.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # These two are the last gate before binaries exist that strangers will
+      # run. A tag is not a good reason to skip them.
+      - name: test
+        run: go test ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: cross-compile
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          build() {
+            os=$1; arch=$2; ext=$3
+            out="dist/statusline-$os-$arch$ext"
+            GOOS=$os GOARCH=$arch go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "$out" .
+            echo "  $(du -h "$out" | cut -f1)  $out"
+          }
+          build windows amd64 .exe
+          build darwin  arm64 ""
+          build darwin  amd64 ""
+          build linux   amd64 ""
+          build linux   arm64 ""
+
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum statusline-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: release notes
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          previous=$(git tag --sort=-version:refname | grep -v "^${tag}$" | head -1)
+
+          {
+            echo "A Claude Code status line as one compiled binary. No interpreter, no"
+            echo "subprocesses, no network."
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "# macOS (Apple silicon)"
+            echo "curl -Lo ~/.claude/statusline https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/statusline-darwin-arm64"
+            echo "chmod +x ~/.claude/statusline"
+            echo
+            echo "# Linux x64"
+            echo "curl -Lo ~/.claude/statusline https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/statusline-linux-amd64"
+            echo "chmod +x ~/.claude/statusline"
+            echo '```'
+            echo
+            echo "Windows (PowerShell):"
+            echo
+            echo '```powershell'
+            echo "curl.exe -Lo \$HOME\\.claude\\statusline.exe https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/statusline-windows-amd64.exe"
+            echo '```'
+            echo
+            echo "Then point \`~/.claude/settings.json\` at it -- see the"
+            echo "[README](https://github.com/${GITHUB_REPOSITORY}#wiring-it-up)."
+            echo
+            echo "Or with Go: \`go install github.com/${GITHUB_REPOSITORY}@${tag}\`"
+            echo
+            echo "## Verify what you downloaded"
+            echo
+            echo '```sh'
+            echo "curl -LO https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/SHA256SUMS"
+            echo "sha256sum --check --ignore-missing SHA256SUMS"
+            echo '```'
+            echo
+            echo "Every binary reports its own version: \`statusline --version\` prints \`${tag}\`."
+            echo
+            echo "## Assets"
+            echo
+            echo "| platform | asset |"
+            echo "|---|---|"
+            echo "| Windows x64 | \`statusline-windows-amd64.exe\` |"
+            echo "| macOS Apple silicon | \`statusline-darwin-arm64\` |"
+            echo "| macOS Intel | \`statusline-darwin-amd64\` |"
+            echo "| Linux x64 | \`statusline-linux-amd64\` |"
+            echo "| Linux arm64 | \`statusline-linux-arm64\` |"
+            echo
+            echo "Built by CI from \`${GITHUB_SHA}\` with \`-trimpath\`, \`CGO_ENABLED=0\`."
+
+            if [ -n "$previous" ]; then
+              echo
+              echo "**Changes:** https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${tag}"
+            fi
+          } > NOTES.md
+
+          cat NOTES.md
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/statusline-* dist/SHA256SUMS \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file NOTES.md \
+            --verify-tag
+
+      # Proves the asset people will download is the one that was built, and that
+      # the version stamping actually reached the binary.
+      - name: verify the published binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tmp=$(mktemp -d)
+          gh release download "${GITHUB_REF_NAME}" \
+            --pattern 'statusline-linux-amd64' --pattern 'SHA256SUMS' --dir "$tmp"
+
+          (cd "$tmp" && sha256sum --check --ignore-missing SHA256SUMS)
+
+          chmod +x "$tmp/statusline-linux-amd64"
+          got=$("$tmp/statusline-linux-amd64" --version)
+          echo "published binary reports: $got"
+          if [ "$got" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::version mismatch: binary says '$got', tag is '${GITHUB_REF_NAME}'"
+            exit 1
+          fi
+
+          # It must still render from a payload, not just answer --version.
+          echo '{"model":{"display_name":"Opus 5"},"cwd":"'"$PWD"'"}' \
+            | "$tmp/statusline-linux-amd64" | head -2

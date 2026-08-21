@@ -42,18 +42,49 @@ See [Benchmarks](#benchmarks) for what that bought.
 
 ### Prebuilt binary
 
-Grab the one for your platform from the latest release (or build it — it takes
-seconds), and drop it wherever you like. `~/.claude/` is the conventional home:
+One file, no runtime. `~/.claude/` is the conventional home, but anywhere works.
 
-| Platform | Asset |
-|---|---|
-| Windows x64 | `statusline-windows-amd64.exe` |
-| macOS Apple silicon | `statusline-darwin-arm64` |
-| macOS Intel | `statusline-darwin-amd64` |
-| Linux x64 | `statusline-linux-amd64` |
-| Linux arm64 | `statusline-linux-arm64` |
+```sh
+# macOS, Apple silicon
+curl -Lo ~/.claude/statusline https://github.com/AbdallaM-Ibrahim/claude-code-statusline/releases/latest/download/statusline-darwin-arm64
+chmod +x ~/.claude/statusline
 
-On macOS and Linux, `chmod +x` it.
+# macOS, Intel
+curl -Lo ~/.claude/statusline https://github.com/AbdallaM-Ibrahim/claude-code-statusline/releases/latest/download/statusline-darwin-amd64
+chmod +x ~/.claude/statusline
+
+# Linux x64  (arm64: swap amd64 for arm64)
+curl -Lo ~/.claude/statusline https://github.com/AbdallaM-Ibrahim/claude-code-statusline/releases/latest/download/statusline-linux-amd64
+chmod +x ~/.claude/statusline
+```
+
+Windows, PowerShell:
+
+```powershell
+curl.exe -Lo $HOME\.claude\statusline.exe https://github.com/AbdallaM-Ibrahim/claude-code-statusline/releases/latest/download/statusline-windows-amd64.exe
+```
+
+Those URLs always resolve to the newest release. Pin a version by swapping
+`latest/download` for `download/v1.0.0`.
+
+| Platform | Asset | Size |
+|---|---|---|
+| Windows x64 | `statusline-windows-amd64.exe` | 7.1 MB |
+| macOS Apple silicon | `statusline-darwin-arm64` | 6.4 MB |
+| macOS Intel | `statusline-darwin-amd64` | 7.0 MB |
+| Linux x64 | `statusline-linux-amd64` | 6.8 MB |
+| Linux arm64 | `statusline-linux-arm64` | 6.3 MB |
+
+Every release ships a `SHA256SUMS`, and the assets are built by CI from the
+tagged commit rather than uploaded from anyone's machine:
+
+```sh
+curl -LO https://github.com/AbdallaM-Ibrahim/claude-code-statusline/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Ask a binary what it is with `statusline --version`. A build from a working tree
+answers `dev`; a released one answers its tag.
 
 ### With Go
 
@@ -105,6 +136,11 @@ On Windows use a forward-slashed absolute path:
 `padding: 0` lets line 1 start at the left edge. `refreshInterval` is in seconds;
 the render is cheap enough that 10 is comfortable, and there is a hard 2-second
 deadline on the whole thing regardless.
+
+Claude Code passes no arguments — the payload arrives on stdin. The one argument
+this understands is `--version`, so a downloaded binary can identify itself;
+anything else is ignored rather than refused, because a status line that will not
+render over an unrecognised flag is worse than one that ignores it.
 
 ---
 
