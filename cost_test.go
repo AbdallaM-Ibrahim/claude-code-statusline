@@ -254,8 +254,8 @@ func TestCostSegmentsDropBlockWhenLimitsPresent(t *testing.T) {
 	rep := &CostReport{
 		SessionUSD: 0.42, HasSession: true,
 		TodayUSD: 1.0, BlockUSD: 3.46,
-		BlockStart: time.Now().Unix() - 600,
-		BlockEnd:   time.Now().Unix() + 3600,
+		BlockStart:  time.Now().Unix() - 600,
+		BlockEnd:    time.Now().Unix() + 3600,
 		BurnPerHour: 2.0,
 	}
 
