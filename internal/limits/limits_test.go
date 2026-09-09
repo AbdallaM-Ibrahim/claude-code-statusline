@@ -1,12 +1,16 @@
 package limits
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/payload"
 	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/testutil"
+	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/usage"
 )
 
 func TestPickWindowPrefersHigherPercentInSameWindow(t *testing.T) {
@@ -117,10 +121,56 @@ func TestIsoToEpoch(t *testing.T) {
 // The real file on this machine has seven_day: null and an expired five_hour;
 // reading it must not panic or error out.
 func TestReadGlobalToleratesRealFile(t *testing.T) {
-	five, week, scoped := readGlobal()
+	t.Setenv(usage.EnvSwitch, "") // never fetch from a test
+	five, week, scoped := readGlobal(context.Background(), time.Now())
 	t.Logf("five=%+v week=%+v scoped=%+v", five, week, scoped)
 	if week != nil && week.Percent < 0 {
 		t.Error("negative percent is not plausible")
+	}
+}
+
+// Two records exist: Claude's ~/.claude.json and the cache internal/usage
+// writes. The newer one wins, whichever file it is — here the cache, which is
+// the only one carrying a per-model row.
+func TestReadGlobalPrefersNewerRecord(t *testing.T) {
+	t.Setenv(usage.EnvSwitch, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)        // os.UserHomeDir on Unix
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	cfgDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
+
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	global := `{"cachedUsageUtilization":{"fetchedAtMs":1000,"utilization":{"limits":[
+	  {"kind":"weekly_all","group":"weekly","percent":10,"resets_at":"` + future + `","scope":null}]}}}`
+	cache := `{"cachedUsageUtilization":{"fetchedAtMs":2000,"utilization":{"limits":[
+	  {"kind":"weekly_all","group":"weekly","percent":20,"resets_at":"` + future + `","scope":null},
+	  {"kind":"weekly_scoped","group":"weekly","percent":44,"resets_at":"` + future + `",
+	   "scope":{"model":{"id":null,"display_name":"Fable"}}}]}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "statusline-usage.json"), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, week, scoped := readGlobal(context.Background(), time.Now())
+	if week == nil || week.Percent != 20 {
+		t.Fatalf("week = %+v, want the cache's 20%%", week)
+	}
+	if len(scoped) != 1 || scoped[0].Label != "Fable" || scoped[0].Window.Percent != 44 {
+		t.Fatalf("scoped = %+v, want Fable 44%% from the cache", scoped)
+	}
+
+	// Flip the ages: Claude's record is newer, so its 10% wins and the per-model
+	// row, which only the cache carries, disappears.
+	global = strings.Replace(global, `"fetchedAtMs":1000`, `"fetchedAtMs":3000`, 1)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, week, scoped = readGlobal(context.Background(), time.Now())
+	if week == nil || week.Percent != 10 || len(scoped) != 0 {
+		t.Fatalf("week = %+v scoped = %+v, want Claude's 10%% and no scoped row", week, scoped)
 	}
 }
 
@@ -145,7 +195,11 @@ const scopedLimitsFixture = `{
 }`
 
 func TestParseGlobalScopedWeek(t *testing.T) {
-	five, week, scoped := parseGlobal([]byte(scopedLimitsFixture))
+	p := parseGlobal([]byte(scopedLimitsFixture))
+	five, week, scoped := p.five, p.week, p.scoped
+	if p.fetchedAtMs != 1788923483992 {
+		t.Errorf("fetchedAtMs = %d, want the record's own stamp", p.fetchedAtMs)
+	}
 	if five == nil || five.Percent != 9 {
 		t.Fatalf("five = %+v, want 9%%", five)
 	}
@@ -164,8 +218,8 @@ func TestParseGlobalScopedWeek(t *testing.T) {
 }
 
 func TestParseGlobalScopedFallsBackToModelID(t *testing.T) {
-	_, _, scoped := parseGlobal([]byte(`{"cachedUsageUtilization":{"fetchedAtMs":0,"utilization":{"limits":[
-		{"kind":"weekly_scoped","group":"weekly","percent":5,"scope":{"model":{"id":"claude-fable-5-1","display_name":""}}}]}}}`))
+	scoped := parseGlobal([]byte(`{"cachedUsageUtilization":{"fetchedAtMs":0,"utilization":{"limits":[
+		{"kind":"weekly_scoped","group":"weekly","percent":5,"scope":{"model":{"id":"claude-fable-5-1","display_name":""}}}]}}}`)).scoped
 	if len(scoped) != 1 || scoped[0].Label != "claude-fable-5-1" {
 		t.Errorf("scoped = %+v, want the model id as the label", scoped)
 	}
@@ -193,11 +247,27 @@ func TestRenderScopedAloneStillRenders(t *testing.T) {
 	}
 }
 
-func TestRenderExpiredScopedRollsOver(t *testing.T) {
+// An expired scoped row is dropped, not rolled over to 0%: the payload has no
+// per-model window to confirm the new week, and the account record is only
+// refreshed by /usage, so on a machine where that has not been opened for a
+// while every reset in it is in the past. Observed 2026-09-09 with a record
+// from 2026-08-28: the 5h/7d windows came from the payload while "Fable 0%"
+// was invented from a row whose reset passed six days earlier.
+func TestRenderExpiredScopedIsDropped(t *testing.T) {
 	now := time.Now().Unix()
-	fable := scopedWindow{Label: "Fable", Window: &window{Percent: 30, ResetsAt: now - 60, Source: sourceGlobal, ObservedAt: now - 3600}}
-	if got := testutil.StripANSI(render(nil, nil, []scopedWindow{fable})); got != "⏳ Fable 0%" {
-		t.Errorf("render = %q, want the rolled-over 0%%", got)
+	expired := scopedWindow{Label: "Fable", Window: &window{Percent: 30, ResetsAt: now - 60, Source: sourceGlobal, ObservedAt: now - 12*24*3600}}
+	if got := testutil.StripANSI(render(nil, nil, []scopedWindow{expired})); got != "" {
+		t.Errorf("render = %q, want nothing rather than a fabricated 0%%", got)
+	}
+
+	week := &window{Percent: 16, ResetsAt: now + 3600, Source: sourceSession, ObservedAt: now}
+	if got := testutil.StripANSI(render(nil, week, []scopedWindow{expired})); got != "⏳ 7d 16%" {
+		t.Errorf("render = %q, want the live week alone", got)
+	}
+
+	unknownReset := scopedWindow{Label: "Fable", Window: &window{Percent: 30, Source: sourceGlobal, ObservedAt: now}}
+	if got := testutil.StripANSI(render(nil, nil, []scopedWindow{unknownReset})); got != "" {
+		t.Errorf("render = %q, want nothing when the reset is unknown", got)
 	}
 }
 
@@ -205,9 +275,11 @@ func TestRenderExpiredScopedRollsOver(t *testing.T) {
 // ~/.claude.json is the host's real file — its size varies per machine, so this
 // row is comparable across runs on one box, not across boxes.
 func BenchmarkLimitsSegment(b *testing.B) {
+	b.Setenv(usage.EnvSwitch, "") // never fetch from a benchmark
 	in := &payload.Input{}
+	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = Segment(in)
+		_ = Segment(ctx, in)
 	}
 }

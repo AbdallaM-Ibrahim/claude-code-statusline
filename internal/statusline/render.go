@@ -90,7 +90,7 @@ func Render(raw []byte) string {
 		}()
 		// The limits segment decides whether the block estimate is redundant, so
 		// it has to be resolved before the cost segments are rendered.
-		lim := limits.Segment(in)
+		lim := limits.Segment(ctx, in)
 		rep := cost.Build(in, time.Now())
 		sessionCh <- sessionParts{limits: lim, cost: cost.Segments(rep, lim != "")}
 	}()

@@ -2,11 +2,14 @@
 // and any per-model weekly caps.
 //
 // Two sources describe the same windows — the payload's rate_limits, which is
-// live for this session, and the account-wide record in ~/.claude.json, which
-// Claude refreshes every few minutes. pickWindow reconciles them.
+// live for this session, and the account-wide usage record: Claude Code's own
+// in ~/.claude.json, refreshed only when /usage is opened, or the one
+// internal/usage fetches when STATUSLINE_USAGE_REFRESH is on. pickWindow
+// reconciles the payload against whichever record is newest.
 package limits
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -17,6 +20,7 @@ import (
 	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/paths"
 	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/payload"
 	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/term"
+	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/usage"
 )
 
 const (
@@ -110,27 +114,40 @@ func isoToEpoch(s string) int64 {
 }
 
 // readGlobal pulls the account-wide windows and any per-model weekly caps out
-// of the account record. Any failure — missing file, or a torn read while
-// Claude rewrites it — yields nothing and the segment simply falls back to the
-// payload.
-func readGlobal() (five, week *window, scoped []scopedWindow) {
-	data, err := os.ReadFile(paths.GlobalConfig())
-	if err != nil {
-		return nil, nil, nil
+// of the newest usage record available: Claude Code's own in ~/.claude.json,
+// this program's opt-in cache, or one fetched right now when the switch is on
+// and both are stale. Any failure — missing file, a torn read while Claude
+// rewrites it, a fetch that did not happen — yields nothing and the segment
+// simply falls back to the payload.
+func readGlobal(ctx context.Context, now time.Time) (five, week *window, scoped []scopedWindow) {
+	global, _ := os.ReadFile(paths.GlobalConfig())
+	best := parseGlobal(global)
+	if cached := parseGlobal(usage.ReadCache()); cached.fetchedAtMs > best.fetchedAtMs {
+		best = cached
 	}
-	return parseGlobal(data)
+	if fresh := usage.Refresh(ctx, usage.ConfigFromEnv(), best.fetchedAtMs, now); fresh != nil {
+		best = parseGlobal(fresh)
+	}
+	return best.five, best.week, best.scoped
 }
 
-func parseGlobal(data []byte) (five, week *window, scoped []scopedWindow) {
+// parsed is one usage record's contribution: the two account-wide windows, the
+// per-model caps, and when the record was fetched (0 when the bytes carry no
+// record), which is what decides between two records.
+type parsed struct {
+	five, week  *window
+	scoped      []scopedWindow
+	fetchedAtMs int64
+}
+
+func parseGlobal(data []byte) parsed {
 	var cfg globalConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, nil, nil
-	}
-	if cfg.CachedUsageUtilization == nil {
-		return nil, nil, nil
+	if len(data) == 0 || json.Unmarshal(data, &cfg) != nil || cfg.CachedUsageUtilization == nil {
+		return parsed{}
 	}
 
-	observedAt := int64(cfg.CachedUsageUtilization.FetchedAtMs / 1000)
+	fetchedAtMs := int64(cfg.CachedUsageUtilization.FetchedAtMs)
+	observedAt := fetchedAtMs / 1000
 	u := cfg.CachedUsageUtilization.Utilization
 
 	fromRow := func(row globalLimitRow) *window {
@@ -167,6 +184,7 @@ func parseGlobal(data []byte) (five, week *window, scoped []scopedWindow) {
 		return nil
 	}
 
+	var scoped []scopedWindow
 	for _, row := range u.Limits {
 		name := term.Sanitize(row.modelName())
 		if name == "" || row.Percent == nil || row.Group != "weekly" {
@@ -175,9 +193,12 @@ func parseGlobal(data []byte) (five, week *window, scoped []scopedWindow) {
 		scoped = append(scoped, scopedWindow{Label: name, Window: fromRow(row)})
 	}
 
-	return pick(u.FiveHour, "session", "five_hour"),
-		pick(u.SevenDay, "weekly", "week", "seven_day"),
-		scoped
+	return parsed{
+		five:        pick(u.FiveHour, "session", "five_hour"),
+		week:        pick(u.SevenDay, "weekly", "week", "seven_day"),
+		scoped:      scoped,
+		fetchedAtMs: fetchedAtMs,
+	}
 }
 
 // pickWindow reconciles this session's headers against the account-wide record.
@@ -257,9 +278,10 @@ func renderWindow(label string, w *window, withClock bool) string {
 
 // Segment renders "⏳ 5h 42% resets 3:15pm · 7d 18% · Fable 30%", or "" when no
 // window is known. Per-model weekly caps follow the account-wide week and
-// appear only while the account record carries one.
-func Segment(in *payload.Input) string {
-	now := time.Now().Unix()
+// appear only while the account record carries a live one.
+func Segment(ctx context.Context, in *payload.Input) string {
+	wall := time.Now()
+	now := wall.Unix()
 	fromPayload := func(w *payload.Window) *window {
 		if w == nil || w.UsedPercentage == nil {
 			return nil
@@ -275,15 +297,21 @@ func Segment(in *payload.Input) string {
 		return lw
 	}
 
-	globalFive, globalWeek, scoped := readGlobal()
+	globalFive, globalWeek, scoped := readGlobal(ctx, wall)
 	five := pickWindow(fromPayload(in.RateLimits.FiveHour), globalFive, fiveHours)
 	week := pickWindow(fromPayload(in.RateLimits.SevenDay), globalWeek, sevenDays)
 	return render(five, week, scoped)
 }
 
-// render joins the reconciled windows. The payload carries no per-model window,
-// so a scoped cap is reconciled against nothing: it still rolls over to 0% once
-// its reset passes, like the other two.
+// render joins the reconciled windows.
+//
+// A scoped cap is never reconciled or rolled over. The payload carries no
+// per-model window, so nothing live can confirm that an expired reading has
+// rolled into a fresh week — and the account record is refreshed only when
+// /usage is opened, so it can sit for weeks with every reset in the past. An
+// expired scoped row therefore says nothing about the current week and is
+// dropped rather than rendered as a fabricated 0%. The 5h/7d windows keep their
+// rollover because the payload backs them from the first API response on.
 func render(five, week *window, scoped []scopedWindow) string {
 	var bits []string
 	if five != nil {
@@ -292,8 +320,9 @@ func render(five, week *window, scoped []scopedWindow) string {
 	if week != nil {
 		bits = append(bits, renderWindow("7d", week, false))
 	}
+	now := time.Now().Unix()
 	for _, sw := range scoped {
-		if w := pickWindow(nil, sw.Window, sevenDays); w != nil {
+		if w := sw.Window; w != nil && w.ResetsAt > now {
 			bits = append(bits, renderWindow(sw.Label, w, false))
 		}
 	}
