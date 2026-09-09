@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -114,9 +115,90 @@ func TestIsoToEpoch(t *testing.T) {
 // The real file on this machine has seven_day: null and an expired five_hour;
 // reading it must not panic or error out.
 func TestReadGlobalLimitsToleratesRealFile(t *testing.T) {
-	five, week := readGlobalLimits()
-	t.Logf("five=%+v week=%+v", five, week)
+	five, week, scoped := readGlobalLimits()
+	t.Logf("five=%+v week=%+v scoped=%+v", five, week, scoped)
 	if week != nil && week.Percent < 0 {
 		t.Error("negative percent is not plausible")
+	}
+}
+
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
+
+// A trimmed copy of the real record: the scoped row is listed before the
+// unscoped one on purpose, so the account-wide week must not pick it up.
+const scopedLimitsFixture = `{
+  "cachedUsageUtilization": {
+    "fetchedAtMs": 1788923483992,
+    "utilization": {
+      "five_hour": {"utilization": 9, "resets_at": "2026-09-09T05:49:59+00:00"},
+      "seven_day": null,
+      "limits": [
+        {"kind": "session", "group": "session", "percent": 9, "resets_at": "2026-09-09T05:49:59+00:00", "scope": null},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 30, "resets_at": "2026-09-10T05:59:59+00:00",
+         "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}},
+        {"kind": "weekly_all", "group": "weekly", "percent": 16, "resets_at": "2026-09-10T05:59:59+00:00", "scope": null},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": null, "resets_at": null,
+         "scope": {"model": {"id": "claude-opus-5", "display_name": "Opus"}}}
+      ]
+    }
+  }
+}`
+
+func TestParseGlobalLimitsScopedWeek(t *testing.T) {
+	five, week, scoped := parseGlobalLimits([]byte(scopedLimitsFixture))
+	if five == nil || five.Percent != 9 {
+		t.Fatalf("five = %+v, want 9%%", five)
+	}
+	if week == nil || week.Percent != 16 {
+		t.Fatalf("week = %+v, want the unscoped 16%% row, not the Fable one", week)
+	}
+	if len(scoped) != 1 {
+		t.Fatalf("scoped = %+v, want exactly the Fable row (Opus has no percent)", scoped)
+	}
+	if scoped[0].Label != "Fable" || scoped[0].Window.Percent != 30 {
+		t.Errorf("scoped[0] = %q %+v, want Fable 30%%", scoped[0].Label, scoped[0].Window)
+	}
+	if scoped[0].Window.ResetsAt != isoToEpoch("2026-09-10T05:59:59+00:00") {
+		t.Errorf("scoped reset not carried through: %d", scoped[0].Window.ResetsAt)
+	}
+}
+
+func TestParseGlobalLimitsScopedFallsBackToModelID(t *testing.T) {
+	_, _, scoped := parseGlobalLimits([]byte(`{"cachedUsageUtilization":{"fetchedAtMs":0,"utilization":{"limits":[
+		{"kind":"weekly_scoped","group":"weekly","percent":5,"scope":{"model":{"id":"claude-fable-5-1","display_name":""}}}]}}}`))
+	if len(scoped) != 1 || scoped[0].Label != "claude-fable-5-1" {
+		t.Errorf("scoped = %+v, want the model id as the label", scoped)
+	}
+}
+
+func TestRenderLimitsAppendsScopedWeek(t *testing.T) {
+	now := time.Now().Unix()
+	week := &limitWindow{Percent: 16, ResetsAt: now + 3600, Source: sourceSession, ObservedAt: now}
+	fable := scopedWindow{Label: "Fable", Window: &limitWindow{Percent: 30, ResetsAt: now + 3600, Source: sourceGlobal, ObservedAt: now}}
+
+	got := stripANSI(renderLimits(nil, week, []scopedWindow{fable}))
+	if got != "⏳ 7d 16% · Fable 30%" {
+		t.Errorf("renderLimits = %q", got)
+	}
+}
+
+func TestRenderLimitsScopedAloneStillRenders(t *testing.T) {
+	now := time.Now().Unix()
+	fable := scopedWindow{Label: "Fable", Window: &limitWindow{Percent: 30, ResetsAt: now + 3600, Source: sourceGlobal, ObservedAt: now}}
+	if got := stripANSI(renderLimits(nil, nil, []scopedWindow{fable})); got != "⏳ Fable 30%" {
+		t.Errorf("renderLimits = %q", got)
+	}
+	if renderLimits(nil, nil, nil) != "" {
+		t.Error("no windows should render nothing")
+	}
+}
+
+func TestRenderLimitsExpiredScopedRollsOver(t *testing.T) {
+	now := time.Now().Unix()
+	fable := scopedWindow{Label: "Fable", Window: &limitWindow{Percent: 30, ResetsAt: now - 60, Source: sourceGlobal, ObservedAt: now - 3600}}
+	if got := stripANSI(renderLimits(nil, nil, []scopedWindow{fable})); got != "⏳ Fable 0%" {
+		t.Errorf("renderLimits = %q, want the rolled-over 0%%", got)
 	}
 }
