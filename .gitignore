@@ -1,6 +1,7 @@
-# Build artifacts — the installed binary lives at ~/.claude/statusline.exe
-statusline
-statusline.exe
+# Build artifacts — the installed binary lives at ~/.claude/statusline.exe.
+# Anchored to the root so they do not swallow cmd/statusline/.
+/statusline
+/statusline.exe
 dist/
 
 # Scratch pricing experiments. The real override is a pricing.json placed next to

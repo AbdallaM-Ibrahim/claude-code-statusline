@@ -45,7 +45,7 @@ jobs:
             GOOS=$os GOARCH=$arch go build \
               -trimpath \
               -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
-              -o "$out" .
+              -o "$out" ./cmd/statusline
             echo "  $(du -h "$out" | cut -f1)  $out"
           }
           build windows amd64 .exe
@@ -90,7 +90,7 @@ jobs:
             echo "Then point \`~/.claude/settings.json\` at it -- see the"
             echo "[README](https://github.com/${GITHUB_REPOSITORY}#wiring-it-up)."
             echo
-            echo "Or with Go: \`go install github.com/${GITHUB_REPOSITORY}@${tag}\`"
+            echo "Or with Go: \`go install github.com/${GITHUB_REPOSITORY}/cmd/statusline@${tag}\`"
             echo
             echo "## Verify what you downloaded"
             echo

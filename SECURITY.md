@@ -25,8 +25,8 @@ bidi override renders a branch name as something it is not. Because the status
 line repaints on a timer, one hostile commit repeats the effect indefinitely and
 gives no hint where it came from.
 
-Every untrusted string therefore passes through `safeTerminal` (`sanitize.go`)
-before it is coloured or truncated. It removes:
+Every untrusted string therefore passes through `term.Sanitize`
+(`internal/term/sanitize.go`) before it is coloured or truncated. It removes:
 
 | Removed | Why |
 |---|---|
@@ -39,18 +39,20 @@ before it is coloured or truncated. It removes:
 Sanitising happens **before** truncation, so a 40-rune cut cannot land inside a
 sequence and reassemble one.
 
-`sanitize_test.go` is the regression suite for this, including the distinction
-that matters when asserting: the only escapes allowed in the output are the SGR
-colour codes this program writes itself.
+`internal/term/sanitize_test.go` is the regression suite for the filter itself.
+The injection tests in `internal/statusline` and `internal/caveman` check the
+rendered lines, using the distinction that matters when asserting: the only
+escapes allowed in the output are the SGR colour codes this program writes
+itself (`testutil.AssertNoInjection`).
 
 ## Fixed in the initial public release
 
 | Finding | Severity | Fix |
 |---|---|---|
-| Git branch name and commit subject were written to the terminal unfiltered; a hostile repository could inject escape sequences on every render | High | `safeTerminal` applied to all git-derived strings, plus the cwd basename and payload strings |
-| One transcript line was read with an unbounded `ReadString`, so a corrupt or hostile line could be buffered whole | Moderate | `maxLineBytes` (4 MiB) cap in `readLine`; an over-long line is stepped over, never buffered or parsed |
+| Git branch name and commit subject were written to the terminal unfiltered; a hostile repository could inject escape sequences on every render | High | `term.Sanitize` applied to all git-derived strings, plus the cwd basename and payload strings |
+| One transcript line was read with an unbounded `ReadString`, so a corrupt or hostile line could be buffered whole | Moderate | `maxLineBytes` (4 MiB) cap in `readLine` (`internal/cost/state.go`); an over-long line is stepped over, never buffered or parsed |
 | Cost-state and git-cache files were written `0644`, though they list every project path on the machine and recent API response ids | Low | `0600` |
-| `readCavemanFile` did `Lstat` then a separate `ReadFile`, so the path could be swapped between the two checks | Low | one `os.Open`, checks against the handle, and `os.SameFile` confirming it is the file `Lstat` approved |
+| The caveman flag read did `Lstat` then a separate `ReadFile`, so the path could be swapped between the two checks | Low | one `os.Open`, checks against the handle, and `os.SameFile` confirming it is the file `Lstat` approved (`internal/caveman`) |
 
 ## Dependency scanning
 
