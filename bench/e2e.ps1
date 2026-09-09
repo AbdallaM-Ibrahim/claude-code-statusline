@@ -77,7 +77,7 @@ if (-not $Go) {
     $Go = Join-Path $HOME ".claude/$exe"
 }
 if (-not (Test-Path $Go)) {
-    throw "binary not found at $Go -- build it first (go build -o `"$Go`" .) or pass -Go"
+    throw "binary not found at $Go -- build it first (go build -o `"$Go`" ./cmd/statusline) or pass -Go"
 }
 if (-not $Js) {
     $candidate = Join-Path $HOME ".claude/statusline.js"

@@ -52,7 +52,7 @@ if (-not $Install) {
         $env:GOOS = $t.os
         $env:GOARCH = $t.arch
         $env:CGO_ENABLED = "0"
-        go build -trimpath -ldflags "-s -w" -o $out .
+        go build -trimpath -ldflags "-s -w" -o $out ./cmd/statusline
         if ($LASTEXITCODE -ne 0) { throw "build failed for $($t.os)/$($t.arch)" }
         $mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
         Write-Host ("  {0,-32} {1} MB" -f (Split-Path $out -Leaf), $mb)
@@ -62,7 +62,7 @@ if (-not $Install) {
 }
 
 Write-Host "`n== install ==" -ForegroundColor Cyan
-go build -trimpath -ldflags "-s -w" -o $hostExe .
+go build -trimpath -ldflags "-s -w" -o $hostExe ./cmd/statusline
 if ($LASTEXITCODE -ne 0) { throw "host build failed" }
 Write-Host "  $hostExe  $([math]::Round((Get-Item $hostExe).Length / 1MB, 1)) MB"
 

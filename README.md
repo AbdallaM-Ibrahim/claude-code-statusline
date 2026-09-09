@@ -89,10 +89,10 @@ answers `dev`; a released one answers its tag.
 ### With Go
 
 ```sh
-go install github.com/AbdallaM-Ibrahim/claude-code-statusline@latest
+go install github.com/AbdallaM-Ibrahim/claude-code-statusline/cmd/statusline@latest
 ```
 
-That lands in `$(go env GOPATH)/bin/claude-code-statusline`.
+That lands in `$(go env GOPATH)/bin/statusline`.
 
 ### From source
 
@@ -100,8 +100,8 @@ That lands in `$(go env GOPATH)/bin/claude-code-statusline`.
 git clone https://github.com/AbdallaM-Ibrahim/claude-code-statusline
 cd claude-code-statusline
 
-go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline        # macOS / Linux
-go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline.exe .  # Windows
+go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline     ./cmd/statusline  # macOS / Linux
+go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline.exe ./cmd/statusline  # Windows
 ```
 
 Pure Go, no cgo. `./build.ps1` cross-compiles every target into `dist/` and
@@ -251,23 +251,46 @@ Things worth knowing:
 - **Nothing older than 48 hours is remembered**, which is what keeps the state
   file and the dedup set bounded.
 
-### File map
+### Package map
 
-| File | Responsibility |
+The code is one binary under `cmd/` and a set of packages under `internal/`,
+which the Go toolchain keeps private to this module. Dependencies point one
+way: `cmd` → `statusline` → the subsystems → the leaf packages. No subsystem
+imports another, so each can be read, tested and benchmarked on its own.
+
+```
+cmd/statusline/         the process boundary: --version, stdin in, two lines out
+internal/
+  statusline/           fan-out, deadlines, panic isolation; composes line 1 and line 2
+  gitinfo/              native git reads, ahead/behind and its hash-pair cache
+  cost/                 incremental transcript scan, hour buckets, block maths, pricing.json
+  limits/               rate-limit windows and reconciliation
+  caveman/              caveman plugin indicator
+  payload/              the stdin contract
+  term/                 colours, terminal-safety filter, ages, clocks, truncation
+  paths/                every file under ~/.claude this program touches
+  testutil/             fixtures shared by more than one package's tests
+```
+
+| Package | Responsibility |
 |---|---|
-| `main.go` | fan-out, deadlines, panic isolation, fallback |
-| `payload.go` | the stdin contract |
-| `place.go` | line 1 composition |
-| `gitread.go`, `gitcache.go` | native git reads, ahead/behind and its cache |
-| `session.go` | line 2 composition |
-| `cost.go`, `coststate.go` | incremental transcript scan, hour buckets, block maths |
-| `pricing.go`, `pricing.json` | token → dollars |
-| `limits.go` | rate-limit windows and reconciliation |
-| `caveman.go` | caveman plugin indicator |
-| `sanitize.go` | terminal-safety filter for every untrusted string |
-| `render.go` | colours, ages, clocks, truncation |
+| `cmd/statusline` | `main`: argument handling, stdin/stdout, the version stamp |
+| `internal/statusline` | `Render`: goroutine fan-out, the 2 s and 400 ms deadlines, panic recovery, the `🤖 Claude` fallback; `place.go` and `session.go` compose the two lines |
+| `internal/gitinfo` | `Read` opens the repository with go-git and returns a `State`; `aheadbehind.go` walks both ancestries; `cache.go` keys the counts on the `(HEAD, upstream)` hash pair |
+| `internal/cost` | `Build` scans transcripts incrementally (`state.go`), prices them (`pricing.go`, embedded `pricing.json`) and `Segments` renders 💰 and 🔥 |
+| `internal/limits` | `Segment` reconciles the payload's windows against `~/.claude.json` |
+| `internal/caveman` | `Segment` reads the plugin flag with symlink and size guards |
+| `internal/payload` | `Input`, `Decode`, and the derived context percentage |
+| `internal/term` | `Sanitize`, the colour helpers, `Heat`, `CompactAge`, `Clock`, `Truncate`, `Basename` |
+| `internal/paths` | `ClaudeDir` and every path derived from it, honouring `CLAUDE_CONFIG_DIR` |
+| `internal/testutil` | the test repository lookup, synthetic transcripts, the injection assertion |
 | `bench/e2e.ps1` | wall-clock harness including process creation |
 | `parity.ts` | diffs this against the bun version it replaces |
+
+Where to look when changing something: a new segment on line 2 is a new
+package under `internal/` plus one line in `internal/statusline/session.go`; a
+new path under `~/.claude` goes in `internal/paths`; anything that puts
+untrusted text on screen must pass through `term.Sanitize` first.
 
 ---
 
@@ -346,7 +369,7 @@ Read that table as a set of design decisions rather than trivia:
 
 - **`RenderFull` (8.4 ms) is less than its parts summed** — line 1 and line 2 are
   gathered concurrently, so the git read hides behind the transcript scan.
-- **`AheadBehindUncached` at 50–94 ms is why `gitcache.go` exists**, and why it is
+- **`AheadBehindUncached` at 50–94 ms is why `internal/gitinfo/cache.go` exists**, and why it is
   keyed on the `(HEAD, upstream)` hash pair rather than a timer: at that price you
   want to pay it only when an answer could actually have changed. `GitReadOnly`,
   which hits that cache, is 7–14× cheaper on the same repository.
@@ -357,10 +380,10 @@ Read that table as a set of design decisions rather than trivia:
   the reason that file is decoded into a narrow struct rather than a generic map.
 
 ```sh
-go test -run '^$' -bench . -benchmem -count=5
+go test ./... -run '^$' -bench . -benchmem -count=5
 
 # the git rows want a repository with history and an upstream
-STATUSLINE_TEST_REPO=~/some/repo go test -run '^$' -bench 'Git|AheadBehind' -benchmem -count=5
+STATUSLINE_TEST_REPO=~/some/repo go test ./internal/gitinfo -run '^$' -bench . -benchmem -count=5
 ```
 
 ### Binary size
@@ -394,9 +417,9 @@ go test ./...                  # suite
 go test -race ./...            # the render fans out; the detector earns its keep
 go vet ./...
 gofmt -l .                     # must print nothing
-go build .
+go build ./cmd/statusline
 
-go test -run '^$' -bench . -benchmem -count=5   # micro-benchmarks
+go test ./... -run '^$' -bench . -benchmem -count=5   # micro-benchmarks
 ```
 
 The git tests and benchmarks resolve their repository in this order:
@@ -405,8 +428,12 @@ variable at a repository with an upstream and a long history to make the
 ahead/behind benchmark say something:
 
 ```sh
-STATUSLINE_TEST_REPO=~/work/some-big-repo go test -run '^$' -bench AheadBehind -count=5
+STATUSLINE_TEST_REPO=~/work/some-big-repo go test ./internal/gitinfo -run '^$' -bench AheadBehind -count=5
 ```
+
+Working from a `git worktree` checkout? go-git cannot resolve HEAD through the
+`.git` file a worktree gets, so the real-repository git tests fail there. Point
+`STATUSLINE_TEST_REPO` at the main checkout instead.
 
 CI runs the suite on Linux, macOS and Windows, plus `go vet`, `gofmt`,
 `go test -race` and `govulncheck`.
@@ -442,7 +469,7 @@ token attribution exactly — `input 576`, `output 232 533`,
 No network, no subprocesses, no secrets read or logged. The interesting surface
 is that **a repository you did not write supplies text this program prints to
 your terminal on a timer** — so every untrusted string is filtered through
-`safeTerminal` before it is coloured or truncated, stripping escape introducers,
+`term.Sanitize` before it is coloured or truncated, stripping escape introducers,
 DEL, single-byte C1 CSI/OSC, bidi overrides and invalid UTF-8.
 
 [SECURITY.md](SECURITY.md) has the threat model, the findings fixed in the first
