@@ -42,14 +42,44 @@ type globalConfig struct {
 		Utilization struct {
 			FiveHour *globalWindowEntry `json:"five_hour"`
 			SevenDay *globalWindowEntry `json:"seven_day"`
-			Limits   []struct {
-				Kind     string   `json:"kind"`
-				Group    string   `json:"group"`
-				Percent  *float64 `json:"percent"`
-				ResetsAt string   `json:"resets_at"`
-			} `json:"limits"`
+			Limits   []globalLimitRow   `json:"limits"`
 		} `json:"utilization"`
 	} `json:"cachedUsageUtilization"`
+}
+
+// globalLimitRow is one entry of the flat "limits" list. Unscoped rows repeat
+// the five_hour / seven_day windows; a row with a model scope is a per-model
+// weekly cap (the "Current week (Fable)" line in /usage) that exists nowhere
+// else in the record.
+type globalLimitRow struct {
+	Kind     string   `json:"kind"`
+	Group    string   `json:"group"`
+	Percent  *float64 `json:"percent"`
+	ResetsAt string   `json:"resets_at"`
+	Scope    *struct {
+		Model *struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"model"`
+	} `json:"scope"`
+}
+
+// modelName is the display name of the model this row is scoped to, or "" for
+// an account-wide row.
+func (r globalLimitRow) modelName() string {
+	if r.Scope == nil || r.Scope.Model == nil {
+		return ""
+	}
+	if r.Scope.Model.DisplayName != "" {
+		return r.Scope.Model.DisplayName
+	}
+	return r.Scope.Model.ID
+}
+
+// scopedWindow is a per-model weekly limit, labelled by the model it caps.
+type scopedWindow struct {
+	Label  string
+	Window *limitWindow
 }
 
 type globalWindowEntry struct {
@@ -69,25 +99,42 @@ func isoToEpoch(s string) int64 {
 	return 0
 }
 
-// readGlobalLimits pulls both windows out of the account-wide record. Any
-// failure — missing file, or a torn read while Claude rewrites it — yields two
-// nils and the segment simply falls back to the payload.
-func readGlobalLimits() (five, week *limitWindow) {
+// readGlobalLimits pulls the account-wide windows and any per-model weekly caps
+// out of the account record. Any failure — missing file, or a torn read while
+// Claude rewrites it — yields nothing and the segment simply falls back to the
+// payload.
+func readGlobalLimits() (five, week *limitWindow, scoped []scopedWindow) {
 	data, err := os.ReadFile(globalConfigPath())
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
+	return parseGlobalLimits(data)
+}
+
+func parseGlobalLimits(data []byte) (five, week *limitWindow, scoped []scopedWindow) {
 	var cfg globalConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if cfg.CachedUsageUtilization == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	observedAt := int64(cfg.CachedUsageUtilization.FetchedAtMs / 1000)
 	u := cfg.CachedUsageUtilization.Utilization
 
+	fromRow := func(row globalLimitRow) *limitWindow {
+		return &limitWindow{
+			Percent:    *row.Percent,
+			ResetsAt:   isoToEpoch(row.ResetsAt),
+			Source:     sourceGlobal,
+			ObservedAt: observedAt,
+		}
+	}
+
+	// pick prefers the dedicated window entry and falls back to the matching
+	// unscoped row. Scoped rows are skipped here: a per-model cap must never be
+	// mistaken for the account-wide week.
 	pick := func(entry *globalWindowEntry, kinds ...string) *limitWindow {
 		if entry != nil && entry.Utilization != nil {
 			return &limitWindow{
@@ -98,22 +145,29 @@ func readGlobalLimits() (five, week *limitWindow) {
 			}
 		}
 		for _, row := range u.Limits {
+			if row.Percent == nil || row.modelName() != "" {
+				continue
+			}
 			for _, k := range kinds {
-				if (row.Kind == k || row.Group == k) && row.Percent != nil {
-					return &limitWindow{
-						Percent:    *row.Percent,
-						ResetsAt:   isoToEpoch(row.ResetsAt),
-						Source:     sourceGlobal,
-						ObservedAt: observedAt,
-					}
+				if row.Kind == k || row.Group == k {
+					return fromRow(row)
 				}
 			}
 		}
 		return nil
 	}
 
+	for _, row := range u.Limits {
+		name := safeTerminal(row.modelName())
+		if name == "" || row.Percent == nil || row.Group != "weekly" {
+			continue
+		}
+		scoped = append(scoped, scopedWindow{Label: name, Window: fromRow(row)})
+	}
+
 	return pick(u.FiveHour, "session", "five_hour"),
-		pick(u.SevenDay, "weekly", "week", "seven_day")
+		pick(u.SevenDay, "weekly", "week", "seven_day"),
+		scoped
 }
 
 // pickWindow reconciles this session's headers against the account-wide record.
@@ -191,8 +245,9 @@ func renderWindow(label string, w *limitWindow, withClock bool) string {
 	return b.String()
 }
 
-// limitsSegment renders "⏳ 5h 42% resets 3:15pm · 7d 18%", or "" when neither
-// window is known.
+// limitsSegment renders "⏳ 5h 42% resets 3:15pm · 7d 18% · Fable 30%", or ""
+// when no window is known. Per-model weekly caps follow the account-wide week
+// and appear only while the account record carries one.
 func limitsSegment(in *StatusLineInput) string {
 	now := time.Now().Unix()
 	fromPayload := func(w *PayloadWindow) *limitWindow {
@@ -210,16 +265,27 @@ func limitsSegment(in *StatusLineInput) string {
 		return lw
 	}
 
-	globalFive, globalWeek := readGlobalLimits()
+	globalFive, globalWeek, scoped := readGlobalLimits()
 	five := pickWindow(fromPayload(in.RateLimits.FiveHour), globalFive, fiveHours)
 	week := pickWindow(fromPayload(in.RateLimits.SevenDay), globalWeek, sevenDays)
+	return renderLimits(five, week, scoped)
+}
 
+// renderLimits joins the reconciled windows. The payload carries no per-model
+// window, so a scoped cap is reconciled against nothing: it still rolls over to
+// 0% once its reset passes, like the other two.
+func renderLimits(five, week *limitWindow, scoped []scopedWindow) string {
 	var bits []string
 	if five != nil {
 		bits = append(bits, renderWindow("5h", five, true))
 	}
 	if week != nil {
 		bits = append(bits, renderWindow("7d", week, false))
+	}
+	for _, sw := range scoped {
+		if w := pickWindow(nil, sw.Window, sevenDays); w != nil {
+			bits = append(bits, renderWindow(sw.Label, w, false))
+		}
 	}
 	if len(bits) == 0 {
 		return ""

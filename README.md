@@ -8,7 +8,7 @@ stdin and prints two lines:
 
 ```
 software-engineer-website ⟨main ↓72⟩ be66d0f 2w ago · first commit
-🤖 Opus 5 xhigh 💭 | 🧠 34% | 💰 $1.42 session / $8.90 today | 🔥 $2.10/hr 🟢 | ⏳ 5h 42% resets 3:15pm · 7d 18%
+🤖 Opus 5 xhigh 💭 | 🧠 34% | 💰 $1.42 session / $8.90 today | 🔥 $2.10/hr 🟢 | ⏳ 5h 42% resets 3:15pm · 7d 18% · Fable 30%
 ```
 
 Line 1 is **where you are**: directory, branch, ahead/behind, HEAD, commit age
@@ -177,6 +177,7 @@ touches the network.
 | Money | `💰 $1.42 session / $8.90 today / $4.10 block (3h 42m left)` | session is exact (Claude Code sends it); the rest is computed |
 | Burn rate | `🔥 $2.10/hr 🟢` | `🟢` under $5/hr, `⚠️` from $5, `🔴` from $15 |
 | Rate limits | `⏳ 5h 42% resets 3:15pm · 7d 18%` | payload window reconciled against the account record |
+| Per-model week | `Fable 30%` | a model-scoped weekly cap (the "Current week (Fable)" line in `/usage`); only while the account record carries one |
 | Caveman | `[CAVEMAN]` | only with the [caveman plugin](https://github.com/JuliusBrussee/caveman) active |
 
 Percentages share one colour scale: green under 50%, yellow from 50%, red from
@@ -461,6 +462,9 @@ public release, and how to report anything new.
   `~`. Add it to `pricing.json`.
 - **`~/.claude.json` is read on every render** for the account-wide rate-limit
   record. It is a ~50 KB parse, which the benchmarks below account for.
+- **Per-model weekly caps come only from that record.** The stdin payload has no
+  scoped window, so `Fable 30%` is as fresh as Claude's last refresh (~5 min)
+  and carries the same age label as any other global reading.
 
 ## Troubleshooting
 
