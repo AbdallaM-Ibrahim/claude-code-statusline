@@ -178,7 +178,7 @@ touches the network.
 | Money | `💰 $1.42 session / $8.90 today / $4.10 block (3h 42m left)` | session is exact (Claude Code sends it); the rest is computed |
 | Burn rate | `🔥 $2.10/hr 🟢` | `🟢` under $5/hr, `⚠️` from $5, `🔴` from $15 |
 | Rate limits | `⏳ 5h 42% resets 3:15pm · 7d 18%` | payload window reconciled against the account record |
-| Per-model week | `Fable 30%` | a model-scoped weekly cap (the "Current week (Fable)" line in `/usage`); only while the account record carries one whose reset is still ahead — open `/usage` to refresh it |
+| Per-model week | `Fable 30%` | a model-scoped weekly cap (the "Current week (Fable)" line in `/usage`); only while the usage record carries one whose reset is still ahead — open `/usage`, or turn on [automatic refresh](#automatic-usage-refresh-opt-in) |
 | Caveman | `[CAVEMAN]` | only with the [caveman plugin](https://github.com/JuliusBrussee/caveman) active |
 
 Percentages share one colour scale: green under 50%, yellow from 50%, red from
@@ -494,14 +494,74 @@ public release, and how to report anything new.
   `~`. Add it to `pricing.json`.
 - **`~/.claude.json` is read on every render** for the account-wide rate-limit
   record. It is a ~50 KB parse, which the benchmarks below account for.
-- **Per-model weekly caps come only from that record, and Claude Code refreshes
-  it only when `/usage` is opened** (verified against v2.1.266: the write sits
+- **Per-model weekly caps come only from a usage record, and Claude Code refreshes
+  its own only when `/usage` is opened** (verified against v2.1.266: the write sits
   behind the `/usage` fetch, throttled to once per 5 minutes, and Claude's own
   reader discards it after an hour). The stdin payload has no scoped window, so
-  `Fable 30%` is as fresh as your last `/usage` and carries the same age label
-  as any other global reading. Once the row's reset passes it is dropped rather
-  than shown as 0% — nothing live can confirm the new week. If the segment is
-  missing, open `/usage` once; it returns on the next render.
+  `Fable 30%` is as fresh as your last `/usage` — or as the last
+  [automatic refresh](#automatic-usage-refresh-opt-in), if you turned it on — and
+  carries the same age label as any other global reading. Once the row's reset
+  passes it is dropped rather than shown as 0% — nothing live can confirm the new
+  week. If the segment is missing, open `/usage` once; it returns on the next
+  render.
+
+## Automatic usage refresh (opt-in)
+
+Off by default. With it off, the program has no network code path and never reads
+a credential — exactly as before.
+
+Claude Code writes the usage record in `~/.claude.json` only when you open
+`/usage`. On a machine where you never do, the per-model week (`Fable 30%`) goes
+stale, then disappears, and the account-wide 5h/7d numbers you see while a session
+is idle can lag too. Set one environment variable on the status line command and
+this program keeps its own record fresh instead:
+
+```jsonc
+// macOS / Linux, and Windows with Git Bash installed (Claude Code runs the
+// command through Git Bash when it is present, PowerShell otherwise)
+"command": "STATUSLINE_USAGE_REFRESH=1 /Users/you/.claude/statusline"
+"command": "STATUSLINE_USAGE_REFRESH=1 C:/Users/you/.claude/statusline.exe"
+```
+
+On Windows without Git Bash, put the two lines in a `statusline.cmd` next to the
+binary and point `command` at that:
+
+```bat
+@set STATUSLINE_USAGE_REFRESH=1
+@"C:\Users\you\.claude\statusline.exe"
+```
+
+| Value | Effect |
+|---|---|
+| unset, empty, `0`, `false`, `off`, `no` | off |
+| `1`, `true`, `on`, `yes` | on, refresh when the newest record is older than **5 minutes** |
+| a Go duration, e.g. `10m`, `1h` | on, at that interval; anything under `2m` is raised to `2m` |
+| anything else | off — a typo must never turn into a network call |
+
+What happens, once per interval, per machine:
+
+1. The render finds both records — Claude's `~/.claude.json` and this program's
+   `~/.claude/statusline-usage.json` — older than the interval.
+2. It reads the OAuth access token Claude Code already holds:
+   `~/.claude/.credentials.json` on Windows and Linux, the login Keychain on macOS
+   (`security find-generic-password -s "Claude Code-credentials" -w`, the only
+   subprocess this program ever spawns, macOS only). A token that is not an OAuth
+   access token (`sk-ant-oat…`), or is within 30 s of expiry, means no request;
+   Claude Code refreshes its token on its own next call and this program never
+   does.
+3. It takes `statusline-usage.lock` so concurrent sessions make one request, not
+   four, and sends `GET https://api.anthropic.com/api/oauth/usage` — the same
+   request `/usage` makes — with a 1.2 s budget inside the render's 2 s deadline.
+   Redirects are refused; the token goes to that host and nowhere else.
+4. A `200` whose body carries a `limits` list is written, verbatim, to
+   `statusline-usage.json` (`0600`) in the same shape as Claude's record. Any
+   other outcome writes nothing, leaves the lock in place as a 60 s back-off, and
+   the segment renders whatever it already had.
+
+The render then reads whichever record was fetched last. Cost on the machine this
+was measured on: about 50 ms of CPU and 14 MB for the one render in every interval
+that fetches; the other renders pay one extra `stat`. Claude Code's own record is
+never written.
 
 ## Troubleshooting
 

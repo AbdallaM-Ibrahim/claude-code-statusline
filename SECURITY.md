@@ -10,11 +10,15 @@ It renders a status line every few seconds from three untrusted sources:
 2. **The Claude Code payload** on stdin — model name, effort level, worktree and
    agent names.
 3. **Local state files** — `~/.claude/statusline-cost-state.json`,
-   `statusline-git-cache.json`, the caveman flag and its savings suffix, and every
-   transcript under `~/.claude/projects`.
+   `statusline-git-cache.json`, `statusline-usage.json`, the caveman flag and its
+   savings suffix, and every transcript under `~/.claude/projects`.
+4. **Only with `STATUSLINE_USAGE_REFRESH` set** — Claude Code's credential store
+   and one HTTPS response from `api.anthropic.com`. See
+   [the opt-in network path](#the-opt-in-network-path-statusline_usage_refresh).
 
-It has no network code path of its own, spawns no subprocesses, and writes
-nothing outside `~/.claude` (or `$CLAUDE_CONFIG_DIR`).
+By default it has no network code path of its own, spawns no subprocesses, and
+writes nothing outside `~/.claude` (or `$CLAUDE_CONFIG_DIR`). The one opt-in
+exception is described below.
 
 ## The main class of bug: terminal escape injection
 
@@ -54,6 +58,26 @@ itself (`testutil.AssertNoInjection`).
 | Cost-state and git-cache files were written `0644`, though they list every project path on the machine and recent API response ids | Low | `0600` |
 | The caveman flag read did `Lstat` then a separate `ReadFile`, so the path could be swapped between the two checks | Low | one `os.Open`, checks against the handle, and `os.SameFile` confirming it is the file `Lstat` approved (`internal/caveman`) |
 
+## The opt-in network path (`STATUSLINE_USAGE_REFRESH`)
+
+`internal/usage` is the only code that touches a credential or a socket, and none
+of it runs unless the environment variable is set on the status line command. With
+it set, at most once per interval (default 5 minutes, floor 2) per machine:
+
+| Step | Guarantee |
+|---|---|
+| Read the OAuth access token from `~/.claude/.credentials.json` (macOS: the login Keychain via `/usr/bin/security`, the program's only subprocess, darwin only) | Only `claudeAiOauth.accessToken` and `expiresAt` are decoded; the refresh token is never read into a typed field. The file is read through `Lstat` with a 64 KiB cap; a symlink or an oversized file reads as absent. |
+| Decide whether to send | The token must start with `sk-ant-oat` — an API key (`sk-ant-api…`) is never sent as a bearer token — and must not be within 30 s of `expiresAt`. This program never refreshes a token. |
+| `GET https://api.anthropic.com/api/oauth/usage` with `Authorization: Bearer …` and `anthropic-beta: oauth-2025-04-20` | The endpoint is a compile-time constant; no environment variable or file can redirect it. `CheckRedirect` refuses every redirect, so the token reaches one host. 1.2 s timeout, 1 MiB body cap. |
+| Cache the response | Only a `200` whose body is a JSON object with a non-null `limits` list is written, to `statusline-usage.json`, `0600`, via temp file and rename. The token is never written anywhere, never logged, never printed. |
+| Serialise across sessions | `statusline-usage.lock` (`O_EXCL`); a failed attempt leaves it in place as a 60 s back-off, so a revoked token costs one request a minute, not one a render. |
+
+What this changes in the threat model: a process that can already read the user's
+`~/.claude` could already read the credential file — this program adds no new
+access. It does add `net/http` and `crypto/tls` to the binary's reachable code, so
+govulncheck findings in those packages now matter when the switch is on. It never
+writes Claude Code's own `~/.claude.json`.
+
 ## Dependency scanning
 
 `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` runs in CI on every push.
@@ -65,8 +89,8 @@ reachable from this code (`GO-2026-6090` in `crypto/tls`, `GO-2026-5972` in
 
 One advisory is knowingly carried: `GO-2026-5932` in `golang.org/x/crypto`
 v0.53.0, which has no published fix. It is reachable only through go-git's SSH
-transport, and this program never opens a network connection — it reads refs and
-objects from disk.
+transport, which this program never uses — git refs and objects are read from
+disk, and the opt-in usage fetch above goes through `net/http`, not go-git.
 
 ## Residual risk worth knowing about
 

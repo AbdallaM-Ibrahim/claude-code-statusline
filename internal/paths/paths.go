@@ -49,6 +49,23 @@ func CavemanSuffix() string {
 	return filepath.Join(ClaudeDir(), ".caveman-statusline-suffix")
 }
 
+// Credentials is Claude Code's credential store on Windows and Linux (macOS keeps
+// it in the Keychain). Read only when STATUSLINE_USAGE_REFRESH is on.
+func Credentials() string {
+	return filepath.Join(ClaudeDir(), ".credentials.json")
+}
+
+// UsageCache holds the usage record this program fetched itself, in the shape of
+// ~/.claude.json's cachedUsageUtilization subtree.
+func UsageCache() string {
+	return filepath.Join(ClaudeDir(), "statusline-usage.json")
+}
+
+// UsageLock serialises usage fetches across concurrent sessions.
+func UsageLock() string {
+	return filepath.Join(ClaudeDir(), "statusline-usage.lock")
+}
+
 // CostState holds the incremental transcript scan offsets.
 func CostState() string {
 	return filepath.Join(ClaudeDir(), "statusline-cost-state.json")
