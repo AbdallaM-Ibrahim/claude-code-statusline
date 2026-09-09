@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,7 +25,9 @@ func setup(t *testing.T) time.Time {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	// The real clock, not a fixed date: lock staleness compares the caller's now
+	// against a file mtime the filesystem stamps with the real clock.
+	now := time.Now().Truncate(time.Millisecond)
 	writeCredentials(t, testToken, now.Add(time.Hour).UnixMilli())
 	return now
 }
@@ -226,7 +229,7 @@ func TestRefreshFetchesWritesCacheAndReturnsRecord(t *testing.T) {
 	}
 }
 
-func TestRefreshRejectsNon200AndBacksOff(t *testing.T) {
+func TestRefreshRejectsNon200AndBacksOffForAnInterval(t *testing.T) {
 	now := setup(t)
 	s := newServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -238,13 +241,122 @@ func TestRefreshRejectsNon200AndBacksOff(t *testing.T) {
 	if ReadCache() != nil {
 		t.Fatal("a 401 must not write a cache")
 	}
-	// The lock is left behind on failure, so the next render inside lockTTL does
-	// not hammer the endpoint with the same bad token.
-	if got := Refresh(context.Background(), on(), 0, now.Add(10*time.Second)); got != nil {
-		t.Fatal("second attempt inside the backoff window should not fetch")
+	// The lock is left behind on failure, so renders for the rest of the interval
+	// do not hammer the endpoint with the same bad token — six sessions rendering
+	// every ten seconds would otherwise be 36 requests a minute.
+	for _, later := range []time.Duration{10 * time.Second, time.Minute, DefaultInterval - time.Second} {
+		if got := Refresh(context.Background(), on(), 0, now.Add(later)); got != nil {
+			t.Fatalf("attempt %s after a failure should not fetch", later)
+		}
 	}
 	if s.hits.Load() != 1 {
-		t.Fatalf("hits = %d, want 1 (backoff)", s.hits.Load())
+		t.Fatalf("hits = %d, want 1 for the whole interval", s.hits.Load())
+	}
+	// One interval later the lock is stale and a fresh attempt is allowed.
+	Refresh(context.Background(), on(), 0, now.Add(DefaultInterval+time.Second))
+	if s.hits.Load() != 2 {
+		t.Fatalf("hits = %d, want 2 after the interval elapsed", s.hits.Load())
+	}
+}
+
+// Several sessions render at once with the same stale record. One request.
+func TestRefreshConcurrentSessionsFetchOnce(t *testing.T) {
+	now := setup(t)
+	body := fixture(t)
+	s := newServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond) // widen the window the lock has to cover
+		w.Write(body)
+	})
+	const sessions = 16
+	var wg sync.WaitGroup
+	var fetched atomic.Int32
+	for i := 0; i < sessions; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if Refresh(context.Background(), on(), 0, now) != nil {
+				fetched.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if s.hits.Load() != 1 {
+		t.Fatalf("hits = %d, want exactly 1 across %d concurrent sessions", s.hits.Load(), sessions)
+	}
+	if fetched.Load() != 1 {
+		t.Fatalf("%d sessions believe they fetched, want 1", fetched.Load())
+	}
+	if ReadCache() == nil {
+		t.Fatal("the one fetch should have left a cache")
+	}
+	if _, err := os.Stat(paths.UsageLock()); !os.IsNotExist(err) {
+		t.Error("lock should be released after the successful fetch")
+	}
+}
+
+// The caller decided the record was stale from a read made before the lock was
+// taken. If another session fetched in between, the cache on disk is fresh and
+// the re-check under the lock must skip the request.
+func TestRefreshDoubleChecksCacheUnderLock(t *testing.T) {
+	now := setup(t)
+	s := serveFixture(t)
+	var rec record
+	rec.CachedUsageUtilization.FetchedAtMs = now.Add(-time.Minute).UnixMilli()
+	rec.CachedUsageUtilization.Utilization = json.RawMessage(`{"limits":[]}`)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !writeCache(paths.UsageCache(), data) {
+		t.Fatal("could not seed the cache")
+	}
+	if got := Refresh(context.Background(), on(), 0 /* caller saw no record */, now); got != nil {
+		t.Fatal("fetched although the cache on disk was fresh")
+	}
+	if s.hits.Load() != 0 {
+		t.Fatalf("hits = %d, want 0", s.hits.Load())
+	}
+	if _, err := os.Stat(paths.UsageLock()); !os.IsNotExist(err) {
+		t.Error("lock should be released when the re-check finds nothing to do")
+	}
+}
+
+// Many sessions find the same stale lock at the same instant. Exactly one may
+// take it over; "stat, remove, create" without the takeover marker lets several
+// through, each deleting the other's fresh lock.
+func TestAcquireStaleTakeoverIsExclusive(t *testing.T) {
+	setup(t)
+	lock := paths.UsageLock()
+	ttl := 2 * time.Minute
+	if !create(lock) {
+		t.Fatal("could not create lock")
+	}
+	old := time.Now().Add(-ttl - time.Minute)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	const contenders = 32
+	var wg sync.WaitGroup
+	var winners atomic.Int32
+	start := make(chan struct{})
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if acquire(lock, now, ttl) {
+				winners.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if winners.Load() != 1 {
+		t.Fatalf("%d contenders took over the stale lock, want exactly 1", winners.Load())
+	}
+	if _, err := os.Stat(lock + ".takeover"); !os.IsNotExist(err) {
+		t.Error("takeover marker left behind")
 	}
 }
 
@@ -328,15 +440,17 @@ func TestRefreshHonoursLockHeldByAnotherSession(t *testing.T) {
 func TestAcquireTakesOverStaleLock(t *testing.T) {
 	setup(t)
 	now := time.Now()
+	ttl := 2 * time.Minute
 	lock := paths.UsageLock()
-	if !acquire(lock, now) {
+	if !acquire(lock, now, ttl) {
 		t.Fatal("first acquire failed")
 	}
-	if acquire(lock, now.Add(lockTTL/2)) {
-		t.Fatal("a lock younger than lockTTL was taken over")
+	if acquire(lock, now.Add(ttl/2), ttl) {
+		t.Fatal("a lock younger than ttl was taken over")
 	}
-	if !acquire(lock, now.Add(lockTTL+time.Second)) {
-		t.Fatal("a lock older than lockTTL was not taken over")
+	// The file's real mtime is "now"; only a later clock makes it stale.
+	if !acquire(lock, now.Add(ttl+time.Second), ttl) {
+		t.Fatal("a lock older than ttl was not taken over")
 	}
 	release(lock)
 	if _, err := os.Stat(lock); !os.IsNotExist(err) {

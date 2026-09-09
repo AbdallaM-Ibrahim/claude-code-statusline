@@ -70,7 +70,7 @@ it set, at most once per interval (default 5 minutes, floor 2) per machine:
 | Decide whether to send | The token must start with `sk-ant-oat` — an API key (`sk-ant-api…`) is never sent as a bearer token — and must not be within 30 s of `expiresAt`. This program never refreshes a token. |
 | `GET https://api.anthropic.com/api/oauth/usage` with `Authorization: Bearer …` and `anthropic-beta: oauth-2025-04-20` | The endpoint is a compile-time constant; no environment variable or file can redirect it. `CheckRedirect` refuses every redirect, so the token reaches one host. 1.2 s timeout, 1 MiB body cap. |
 | Cache the response | Only a `200` whose body is a JSON object with a non-null `limits` list is written, to `statusline-usage.json`, `0600`, via temp file and rename. The token is never written anywhere, never logged, never printed. |
-| Serialise across sessions | `statusline-usage.lock` (`O_EXCL`); a failed attempt leaves it in place as a 60 s back-off, so a revoked token costs one request a minute, not one a render. |
+| Serialise across sessions | `statusline-usage.lock` (`O_EXCL`), with the cache re-checked under the lock so a session that lost the race does not fetch again; a stale lock is taken over through a second exclusive marker so two sessions cannot both win it. A failed attempt leaves the lock in place as a back-off of one full interval, so a revoked token costs one request per interval, not one per render. Ceiling: one request per interval per machine, succeeding or failing. |
 
 What this changes in the threat model: a process that can already read the user's
 `~/.claude` could already read the credential file — this program adds no new

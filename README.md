@@ -550,13 +550,18 @@ What happens, once per interval, per machine:
    Claude Code refreshes its token on its own next call and this program never
    does.
 3. It takes `statusline-usage.lock` so concurrent sessions make one request, not
-   four, and sends `GET https://api.anthropic.com/api/oauth/usage` — the same
-   request `/usage` makes — with a 1.2 s budget inside the render's 2 s deadline.
+   four, re-checks the cache under the lock in case another session just fetched,
+   and sends `GET https://api.anthropic.com/api/oauth/usage` — the same request
+   `/usage` makes — with a 1.2 s budget inside the render's 2 s deadline.
    Redirects are refused; the token goes to that host and nowhere else.
 4. A `200` whose body carries a `limits` list is written, verbatim, to
    `statusline-usage.json` (`0600`) in the same shape as Claude's record. Any
-   other outcome writes nothing, leaves the lock in place as a 60 s back-off, and
-   the segment renders whatever it already had.
+   other outcome writes nothing and leaves the lock in place, which backs the next
+   attempt off for a full interval; the segment renders whatever it already had.
+
+The hard ceiling is therefore **one request per interval per machine**, however
+many sessions are open and however often they render — and the same ceiling holds
+while the request is failing.
 
 The render then reads whichever record was fetched last. Cost on the machine this
 was measured on: about 50 ms of CPU and 14 MB for the one render in every interval

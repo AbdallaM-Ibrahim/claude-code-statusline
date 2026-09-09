@@ -51,10 +51,7 @@ func refuseRedirect(*http.Request, []*http.Request) error { return http.ErrUseLa
 // session already fetching or recently failed, network, status or shape failure.
 // Failure is silent by design: the segment falls back to what it has.
 func Refresh(ctx context.Context, cfg Config, newestFetchedAtMs int64, now time.Time) []byte {
-	if !cfg.Enabled {
-		return nil
-	}
-	if newestFetchedAtMs > 0 && now.Sub(time.UnixMilli(newestFetchedAtMs)) < cfg.Interval {
+	if !cfg.Enabled || isFresh(newestFetchedAtMs, now, cfg.Interval) {
 		return nil
 	}
 	tok := token(now)
@@ -62,12 +59,20 @@ func Refresh(ctx context.Context, cfg Config, newestFetchedAtMs int64, now time.
 		return nil
 	}
 	lock := paths.UsageLock()
-	if !acquire(lock, now) {
+	if !acquire(lock, now, cfg.Interval) {
+		return nil
+	}
+	// Re-check under the lock. Another session may have fetched and released
+	// between this render's read of the cache and its acquire; its record is on
+	// disk now, and a second request inside the interval is exactly what the
+	// lock exists to prevent.
+	if isFresh(FetchedAtMs(ReadCache()), now, cfg.Interval) {
+		release(lock)
 		return nil
 	}
 	body, ok := fetch(ctx, tok)
 	if !ok {
-		return nil // the lock stays: see lockTTL
+		return nil // the lock stays as the back-off: see acquire
 	}
 	var rec record
 	rec.CachedUsageUtilization.FetchedAtMs = now.UnixMilli()
@@ -81,6 +86,13 @@ func Refresh(ctx context.Context, cfg Config, newestFetchedAtMs int64, now time.
 	}
 	release(lock)
 	return data
+}
+
+// isFresh reports whether a record fetched at fetchedAtMs (0 for none) is still
+// inside the interval. A stamp in the future — clock skew, another machine's
+// record synced in — counts as fresh: never fetch on the strength of a bad clock.
+func isFresh(fetchedAtMs int64, now time.Time, interval time.Duration) bool {
+	return fetchedAtMs > 0 && now.Sub(time.UnixMilli(fetchedAtMs)) < interval
 }
 
 // fetch performs the request and returns the validated body.
