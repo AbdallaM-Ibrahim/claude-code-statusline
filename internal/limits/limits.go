@@ -257,7 +257,7 @@ func renderWindow(label string, w *window, withClock bool) string {
 
 // Segment renders "⏳ 5h 42% resets 3:15pm · 7d 18% · Fable 30%", or "" when no
 // window is known. Per-model weekly caps follow the account-wide week and
-// appear only while the account record carries one.
+// appear only while the account record carries a live one.
 func Segment(in *payload.Input) string {
 	now := time.Now().Unix()
 	fromPayload := func(w *payload.Window) *window {
@@ -281,9 +281,15 @@ func Segment(in *payload.Input) string {
 	return render(five, week, scoped)
 }
 
-// render joins the reconciled windows. The payload carries no per-model window,
-// so a scoped cap is reconciled against nothing: it still rolls over to 0% once
-// its reset passes, like the other two.
+// render joins the reconciled windows.
+//
+// A scoped cap is never reconciled or rolled over. The payload carries no
+// per-model window, so nothing live can confirm that an expired reading has
+// rolled into a fresh week — and the account record is refreshed only when
+// /usage is opened, so it can sit for weeks with every reset in the past. An
+// expired scoped row therefore says nothing about the current week and is
+// dropped rather than rendered as a fabricated 0%. The 5h/7d windows keep their
+// rollover because the payload backs them from the first API response on.
 func render(five, week *window, scoped []scopedWindow) string {
 	var bits []string
 	if five != nil {
@@ -292,8 +298,9 @@ func render(five, week *window, scoped []scopedWindow) string {
 	if week != nil {
 		bits = append(bits, renderWindow("7d", week, false))
 	}
+	now := time.Now().Unix()
 	for _, sw := range scoped {
-		if w := pickWindow(nil, sw.Window, sevenDays); w != nil {
+		if w := sw.Window; w != nil && w.ResetsAt > now {
 			bits = append(bits, renderWindow(sw.Label, w, false))
 		}
 	}

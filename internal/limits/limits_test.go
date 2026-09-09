@@ -193,11 +193,27 @@ func TestRenderScopedAloneStillRenders(t *testing.T) {
 	}
 }
 
-func TestRenderExpiredScopedRollsOver(t *testing.T) {
+// An expired scoped row is dropped, not rolled over to 0%: the payload has no
+// per-model window to confirm the new week, and the account record is only
+// refreshed by /usage, so on a machine where that has not been opened for a
+// while every reset in it is in the past. Observed 2026-09-09 with a record
+// from 2026-08-28: the 5h/7d windows came from the payload while "Fable 0%"
+// was invented from a row whose reset passed six days earlier.
+func TestRenderExpiredScopedIsDropped(t *testing.T) {
 	now := time.Now().Unix()
-	fable := scopedWindow{Label: "Fable", Window: &window{Percent: 30, ResetsAt: now - 60, Source: sourceGlobal, ObservedAt: now - 3600}}
-	if got := testutil.StripANSI(render(nil, nil, []scopedWindow{fable})); got != "⏳ Fable 0%" {
-		t.Errorf("render = %q, want the rolled-over 0%%", got)
+	expired := scopedWindow{Label: "Fable", Window: &window{Percent: 30, ResetsAt: now - 60, Source: sourceGlobal, ObservedAt: now - 12*24*3600}}
+	if got := testutil.StripANSI(render(nil, nil, []scopedWindow{expired})); got != "" {
+		t.Errorf("render = %q, want nothing rather than a fabricated 0%%", got)
+	}
+
+	week := &window{Percent: 16, ResetsAt: now + 3600, Source: sourceSession, ObservedAt: now}
+	if got := testutil.StripANSI(render(nil, week, []scopedWindow{expired})); got != "⏳ 7d 16%" {
+		t.Errorf("render = %q, want the live week alone", got)
+	}
+
+	unknownReset := scopedWindow{Label: "Fable", Window: &window{Percent: 30, Source: sourceGlobal, ObservedAt: now}}
+	if got := testutil.StripANSI(render(nil, nil, []scopedWindow{unknownReset})); got != "" {
+		t.Errorf("render = %q, want nothing when the reset is unknown", got)
 	}
 }
 
