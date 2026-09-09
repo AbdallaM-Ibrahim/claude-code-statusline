@@ -104,8 +104,9 @@ go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline     ./cmd/statusline
 go build -trimpath -ldflags "-s -w" -o ~/.claude/statusline.exe ./cmd/statusline  # Windows
 ```
 
-Pure Go, no cgo. `./build.ps1` cross-compiles every target into `dist/` and
-installs the host binary in one step.
+Or, with make: `make install` builds the host binary into `~/.claude`, and
+`make dist` cross-compiles every target into `dist/` with checksums. Pure Go, no
+cgo. On Windows without make, `./build.ps1` does both in one step.
 
 Requires Go **1.26.6 or newer** — that floor is a security requirement, not a
 preference. See [SECURITY.md](SECURITY.md#dependency-scanning).
@@ -421,6 +422,10 @@ go build ./cmd/statusline
 
 go test ./... -run '^$' -bench . -benchmem -count=5   # micro-benchmarks
 ```
+
+The same commands are Make targets: `make check` runs gofmt, vet, test and
+build as CI does, and `make race`, `make bench`, `make vulncheck`, `make dist`
+and `make install` cover the rest. `make help` lists them.
 
 The git tests and benchmarks resolve their repository in this order:
 `STATUSLINE_TEST_REPO`, then the checkout you are in, then skip. Point the
