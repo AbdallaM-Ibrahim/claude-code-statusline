@@ -82,7 +82,10 @@ func Refresh(ctx context.Context, cfg Config, newestFetchedAtMs int64, now time.
 		return nil
 	}
 	if !writeCache(paths.UsageCache(), data) {
-		return nil
+		// The request was made and answered; this render still shows the result.
+		// The lock stays, as for a failed fetch: releasing it with nothing on
+		// disk would send every other session straight back to the endpoint.
+		return data
 	}
 	release(lock)
 	return data

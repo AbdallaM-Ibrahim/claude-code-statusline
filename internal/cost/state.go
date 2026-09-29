@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/atomicfile"
 )
 
 // horizonHours bounds everything this package remembers. The status line only
@@ -87,15 +89,9 @@ func (st *state) save(path string) {
 	if err != nil {
 		return
 	}
-	tmp := path + "." + strconv.Itoa(os.Getpid()) + ".tmp"
 	// 0600: this file enumerates every project path on the machine and the id of
 	// every API response seen in the last two days. No other account needs it.
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-	}
+	atomicfile.Write(path, data, 0o600)
 }
 
 func (st *state) prune(horizon int64) {

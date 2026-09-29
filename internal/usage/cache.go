@@ -2,9 +2,8 @@ package usage
 
 import (
 	"encoding/json"
-	"os"
-	"strconv"
 
+	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/atomicfile"
 	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/paths"
 )
 
@@ -28,16 +27,8 @@ func FetchedAtMs(data []byte) int64 {
 	return r.CachedUsageUtilization.FetchedAtMs
 }
 
-// writeCache writes atomically via a per-process temp file and rename, 0600:
-// the record names the account's plan and utilisation, nobody else's business.
+// writeCache writes atomically, 0600: the record names the account's plan and
+// utilisation, nobody else's business.
 func writeCache(path string, data []byte) bool {
-	tmp := path + "." + strconv.Itoa(os.Getpid()) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return false
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return false
-	}
-	return true
+	return atomicfile.Write(path, data, 0o600)
 }

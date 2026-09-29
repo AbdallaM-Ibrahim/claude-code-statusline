@@ -3,9 +3,9 @@ package gitinfo
 import (
 	"encoding/json"
 	"os"
-	"strconv"
 	"time"
 
+	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/atomicfile"
 	"github.com/AbdallaM-Ibrahim/claude-code-statusline/internal/paths"
 )
 
@@ -55,16 +55,9 @@ func (c *cache) save() {
 	if err != nil {
 		return
 	}
-	path := paths.GitCache()
-	tmp := path + "." + strconv.Itoa(os.Getpid()) + ".tmp"
 	// 0600 for the same reason as the cost state: it maps local repository paths
 	// to commit hashes, which is nobody else's business on a shared machine.
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-	}
+	atomicfile.Write(paths.GitCache(), data, 0o600)
 }
 
 func cacheKey(repoPath, head, upstream string) string {
