@@ -259,6 +259,30 @@ func TestRefreshRejectsNon200AndBacksOffForAnInterval(t *testing.T) {
 	}
 }
 
+// The fetch succeeded but the cache could not be written — on Windows, a target
+// held open past the rename retries. The answer was already paid for, so this
+// render shows it; the lock stays so other sessions do not fetch it again.
+func TestRefreshReturnsRecordWhenCacheWriteFails(t *testing.T) {
+	now := setup(t)
+	s := serveFixture(t)
+	// A non-empty directory where the cache file belongs: no platform renames a
+	// file over it.
+	if err := os.MkdirAll(filepath.Join(paths.UsageCache(), "blocker"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Refresh(context.Background(), on(), 0, now)
+	if got == nil || FetchedAtMs(got) != now.UnixMilli() {
+		t.Fatal("a fetched record must be returned even when it cannot be cached")
+	}
+	if _, err := os.Stat(paths.UsageLock()); err != nil {
+		t.Error("lock should stay when nothing reached disk")
+	}
+	if Refresh(context.Background(), on(), 0, now.Add(time.Minute)) != nil || s.hits.Load() != 1 {
+		t.Fatalf("hits = %d, want 1: the held lock must back the next render off", s.hits.Load())
+	}
+}
+
 // Several sessions render at once with the same stale record. One request.
 func TestRefreshConcurrentSessionsFetchOnce(t *testing.T) {
 	now := setup(t)

@@ -270,6 +270,7 @@ internal/
   payload/              the stdin contract
   term/                 colours, terminal-safety filter, ages, clocks, truncation
   paths/                every file under ~/.claude this program touches
+  atomicfile/           torn-write-proof state files, with the Windows rename retry
   testutil/             fixtures shared by more than one package's tests
 ```
 
@@ -284,6 +285,7 @@ internal/
 | `internal/payload` | `Input`, `Decode`, and the derived context percentage |
 | `internal/term` | `Sanitize`, the colour helpers, `Heat`, `CompactAge`, `Clock`, `Truncate`, `Basename` |
 | `internal/paths` | `ClaudeDir` and every path derived from it, honouring `CLAUDE_CONFIG_DIR` |
+| `internal/atomicfile` | `Write`: temp file plus rename for every state file; on Windows, retries briefly while another reader holds the target open |
 | `internal/testutil` | the test repository lookup, synthetic transcripts, the injection assertion |
 | `bench/e2e.ps1` | wall-clock harness including process creation |
 | `parity.ts` | diffs this against the bun version it replaces |
