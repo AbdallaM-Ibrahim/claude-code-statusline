@@ -201,7 +201,7 @@ window — two competing "how much is left" readings on one line is one too many
 
 Transcripts record token counts and a model name, never a cost. `today`, `block`
 and the burn rate are therefore priced from `pricing.json`, embedded at build
-time with `go:embed` (25 models at present).
+time with `go:embed` (34 models at present).
 
 To override without rebuilding, drop a `pricing.json` next to the binary; its
 entries win. That is the escape hatch for a model released after your build —

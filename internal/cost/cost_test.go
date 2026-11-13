@@ -22,7 +22,7 @@ var (
 
 func TestPricingTableHasModelsInUse(t *testing.T) {
 	p := loadPricing()
-	for _, m := range []string{"claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5-20251001", "<synthetic>"} {
+	for _, m := range []string{"claude-fable-5-1", "claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5-20251001", "<synthetic>"} {
 		if _, ok := p[m]; !ok {
 			t.Errorf("pricing table missing %q, which appears in real transcripts", m)
 		}
